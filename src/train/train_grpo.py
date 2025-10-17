@@ -3,13 +3,24 @@ import torch
 from peft import LoraConfig
 import ast
 import pathlib
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
+from transformers import (
+    AutoProcessor, 
+    BitsAndBytesConfig, 
+    Qwen2VLForConditionalGeneration, 
+    HfArgumentParser, 
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration
+)
 
 from src.trainer import QwenGRPOTrainer
 from src.dataset import make_grpo_data_module
 from src.params import DataArguments, ModelArguments, GRPOArguments
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
-from monkey_patch_forward import replace_qwen2_5_with_mixed_modality_forward, replace_qwen_2_with_mixed_modality_forward
+from monkey_patch_forward import (
+    replace_qwen2_5_with_mixed_modality_forward, 
+    replace_qwen_2_with_mixed_modality_forward,
+    replace_qwen3_with_mixed_modality_forward
+)
 from monkey_patch_vision import replace_qwen2_5_vision
 from src.utils import  load_reward_funcs
 
@@ -84,6 +95,11 @@ def train():
         replace_qwen2_5_vision()
         # It monkey patches the forward to handle mixed modality inputs.
         replace_qwen2_5_with_mixed_modality_forward()
+
+    elif "Qwen3" in model_args.model_id:
+        # It monkey patches the forward to handle mixed modality inputs.
+        replace_qwen3_with_mixed_modality_forward()
+    
     else:
         # It monkey patches the forward to handle mixed modality inputs.
         replace_qwen_2_with_mixed_modality_forward()
@@ -137,6 +153,14 @@ def train():
             **bnb_model_from_pretrained_args
         )
 
+    elif "Qwen3" in model_args.model_id:
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            model_args.model_id,
+            dtype=compute_dtype,
+            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
+            **bnb_model_from_pretrained_args
+        )
+
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
@@ -187,6 +211,7 @@ def train():
                 model.to(torch.float16)
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
+    processor.image_processor.do_resize = False
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer
@@ -211,7 +236,8 @@ def train():
     trainer = QwenGRPOTrainer(
         model=model,
         train_dataset=dataset_module["train_dataset"],
-        eval_dataset = dataset_module["eval_dataset"],
+        eval_dataset=dataset_module["eval_dataset"],
+        processing_class=processor,
         reward_funcs=reward_funcs,
         args=training_args,
         peft_config=peft_config,

@@ -48,6 +48,15 @@ class GRPODataset(Dataset):
         self.fps = data_args.fps
         self.nframes = data_args.nframes
 
+        if "Qwen3" in self.model_id:
+            self.image_patch_size = 16
+            self.return_video_metadata = True
+        else:
+            self.image_patch_size = 14
+            self.return_video_metadata = False
+
+        self.processor.image_processor.do_resize = False
+
     def __len__(self):
         return len(self.list_data_dict)
     
@@ -71,7 +80,15 @@ class GRPODataset(Dataset):
                 if not os.path.exists(image_file):
                     if not image_file.startswith("http"):
                         image_file = os.path.join(image_folder, image_file)
-                images.append(get_image_info(image_file, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+                image_input = get_image_info(
+                        image_file, 
+                        self.image_min_pixel, 
+                        self.image_max_pixel, 
+                        self.image_resized_w, 
+                        self.image_resized_h, 
+                        self.image_patch_size
+                    )
+                images.append(image_input)
         elif "video" in sources:
             is_video = True
             images=None
@@ -87,7 +104,16 @@ class GRPODataset(Dataset):
                 if not os.path.exists(video_file):
                     if not video_file.startswith("http"):
                         video_file = os.path.join(video_folder, video_file)
-                video_input, video_kwargs = get_video_info(video_file, self.video_min_pixel, self.video_max_pixel, self.video_resized_w, self.video_resized_h, self.data_args.fps)
+                video_input, video_kwargs = get_video_info(
+                    video_file, 
+                    self.video_min_pixel, 
+                    self.video_max_pixel, 
+                    self.video_resized_w, 
+                    self.video_resized_h, 
+                    self.data_args.fps,
+                    self.image_patch_size,
+                    return_video_metadata=self.return_video_metadata
+                )
                 videos.append(video_input)
         else:
             images=None
