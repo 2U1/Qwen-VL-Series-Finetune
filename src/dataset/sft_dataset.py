@@ -183,20 +183,21 @@ class SupervisedDataset(Dataset):
                     all_second_gird.extend(inputs["second_per_grid_ts"])
                 elif "Qwen3" in self.model_id:
 
-                    video_datas, video_metadatas = zip(*videos)
-                    video_datas, video_metadatas = list(video_datas), list(video_metadatas)
-                    
+                    videos_for_this_turn = videos[video_curr_count : video_curr_count + num_videos]
+                    video_datas_for_turn, video_metadatas_for_turn = zip(*videos_for_this_turn)
+                    video_datas_for_turn = list(video_datas_for_turn)
+                    video_metadatas_for_turn = list(video_metadatas_for_turn)
+
                     inputs = processor(
-                        text=[user_input], 
-                        images=images, 
-                        videos=videos_for_this_turn, 
-                        padding=False, 
-                        do_resize=False, 
-                        return_tensors='pt', 
-                        **video_kwargs, 
-                        video_metadata=video_metadatas,
+                        text=[user_input],
+                        images=images,
+                        videos=video_datas_for_turn,
+                        padding=False,
+                        do_resize=False,
+                        return_tensors='pt',
+                        **video_kwargs,
+                        video_metadata=video_metadatas_for_turn,
                     )
-                
                 else:
                     inputs = processor(
                         text=[user_input], 
