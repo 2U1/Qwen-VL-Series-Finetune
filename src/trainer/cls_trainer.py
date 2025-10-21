@@ -20,6 +20,9 @@ from transformers.utils import is_datasets_available
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import datasets
+from typing import Optional, Callable
+from functools import partial
+from torch.utils.data import Dataset
 
 from src.train.train_utils import get_peft_state_non_lora_maybe_zero_3
 
@@ -62,34 +65,64 @@ class QwenCLSTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
-        train_dataset = self.train_dataset
+        sampler = self._custom_sampler if self._custom_sampler is not None else self._get_train_sampler()
+
+        return self._get_dataloader(
+            dataset=self.train_dataset,
+            description="Training",
+            batch_size=self._train_batch_size,
+            sampler_fn=sampler,
+            is_training=True,
+        )
+    
+    def _get_dataloader(
+        self,
+        dataset: Dataset,
+        description: str,
+        batch_size: int,
+        sampler_fn: Optional[Callable[[Dataset], torch.utils.data.Sampler]] = None,
+        is_training: bool = False,
+        dataloader_key: Optional[str] = None,
+    ) -> DataLoader:
+        """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
+
         data_collator = self.data_collator
-        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
-            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        if is_datasets_available() and isinstance(dataset, datasets.Dataset):
+            dataset = self._remove_unused_columns(dataset, description=description)
         else:
-            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+            data_collator = self._get_collator_with_removed_columns(self.data_collator, description=description)
 
         dataloader_params = {
-            "batch_size": self._train_batch_size,
+            "batch_size": batch_size,
             "collate_fn": data_collator,
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
         }
-        
-        sampler = self._custom_sampler if self._custom_sampler is not None else self._get_train_sampler()
-        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = sampler
+
+        if not isinstance(dataset, torch.utils.data.IterableDataset):
+            if sampler_fn is not None:
+                dataloader_params["sampler"] = sampler_fn(dataset)
             dataloader_params["drop_last"] = self.args.dataloader_drop_last
-            dataloader_params["worker_init_fn"] = seed_worker
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+            if is_training:
+                dataloader_params["worker_init_fn"] = partial(
+                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index
+                )
 
-        dl = DataLoader(train_dataset, **dataloader_params)
+        dataloader = DataLoader(dataset, **dataloader_params)
+        
+        if isinstance(sampler_fn, DistributedSampler):
+            dataloader = self.accelerator.prepare(dataloader)
 
-        if isinstance(sampler, DistributedSampler):
-            return dl
+        # Store the prepared dataloader for subsequent evaluations if using persistent workers.
+        if dataloader_key is not None and self.args.dataloader_persistent_workers:
+            if hasattr(self, "_eval_dataloaders"):
+                self._eval_dataloaders[dataloader_key] = dataloader
+            else:
+                self._eval_dataloaders = {dataloader_key: dataloader}
 
-        return self.accelerator.prepare(dl)
+        return dataloader
 
 
     def create_optimizer(self):
