@@ -1,7 +1,14 @@
 from pathlib import Path
 from peft import PeftModel
 import torch
-from transformers import BitsAndBytesConfig, Qwen2VLForConditionalGeneration, AutoProcessor, AutoConfig, Qwen2_5_VLForConditionalGeneration
+from transformers import (
+    BitsAndBytesConfig, 
+    Qwen2VLForConditionalGeneration, 
+    AutoProcessor, 
+    AutoConfig, 
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration
+)
 import warnings
 import os
 import json
@@ -48,10 +55,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             del lora_cfg_pretrained.quantization_config
         processor = AutoProcessor.from_pretrained(model_base)
         print('Loading Qwen2-VL from base model...')
-        if "Qwen2.5" in model_base:
+        if "Qwen3" in model_base:
+            model = Qwen3VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+        elif "Qwen2.5" in model_base:
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
         else:
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+            
         token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
         if model.lm_head.weight.shape[0] != token_num:
             model.lm_head.weight = torch.nn.Parameter(torch.empty(token_num, tokem_dim, device=model.device, dtype=model.dtype))
@@ -78,12 +88,14 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         with open(config_path, 'r') as f:
             config = json.load(f)
 
-        if "Qwen2_5" in config["architectures"][0]:
-            processor = AutoProcessor.from_pretrained(model_path)
+        processor = AutoProcessor.from_pretrained(model_path)
+        
+        architecture = config.get("architectures", [None])[0]
+        if "Qwen3" in architecture:
+            model = Qwen3VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+        elif "Qwen2_5" in architecture:
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
-
         else:
-            processor = AutoProcessor.from_pretrained(model_path)
             model = Qwen2VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
     return processor, model
