@@ -159,7 +159,7 @@ class QwenSFTTrainer(Trainer):
             if getattr(self.args, 'save_latest_only', False) and os.path.exists(output_dir):
                 import shutil
                 logger.info(f"Removing old checkpoint to save disk space: {output_dir}")
-                shutil.rmtree(output_dir)
+                shutil.rmtree(output_dir, ignore_errors=True)
 
             self.save_model(output_dir, _internal_call=True)
 
