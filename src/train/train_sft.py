@@ -298,6 +298,24 @@ def train():
                     if "lora_" not in name:  # Don't touch LoRA adapters
                         param.requires_grad = True
 
+        # Re-unfreeze top-k LLM layers if unfreeze_topk_llm > 0 (for Phase 2a incremental unfreezing)
+        k_llm = getattr(training_args, "unfreeze_topk_llm", 0)
+        if k_llm > 0:
+            rank0_print(f"Re-enabling top {k_llm} LLM layers for incremental unfreezing...")
+            # Access the base model through PEFT wrapper
+            base_model = model.base_model if hasattr(model, 'base_model') else model
+            if hasattr(base_model, 'model'):
+                base_model = base_model.model
+
+            if hasattr(base_model, "language_model") and hasattr(base_model.language_model, "layers"):
+                total_layers = len(base_model.language_model.layers)
+                for layer_idx, layer in enumerate(base_model.language_model.layers[-k_llm:]):
+                    actual_idx = total_layers - k_llm + layer_idx
+                    rank0_print(f"  Unfreezing layer {actual_idx}/{total_layers-1}")
+                    for name, p in layer.named_parameters():
+                        if "lora_" not in name:  # Don't touch LoRA adapters
+                            p.requires_grad = True
+
         # Explicitly ensure LoRA parameters are trainable
         # This is critical - without this, LoRA parameters may not have requires_grad=True
         rank0_print("Ensuring LoRA parameters are trainable...")
