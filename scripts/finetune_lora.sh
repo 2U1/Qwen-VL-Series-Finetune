@@ -27,8 +27,8 @@ deepspeed src/train/train_sft.py \
     --num_lora_modules -1 \
     --deepspeed scripts/zero3_offload.json \
     --model_id $MODEL_NAME \
-    --data_path data/training_data.json \
-    --image_folder data/screenshots \
+    --data_path /src/data/training_data.json \
+    --image_folder /src/data/screenshots \
     --remove_unused_columns False \
     --freeze_vision_tower False \
     --freeze_llm True \
