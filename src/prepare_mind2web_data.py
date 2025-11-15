@@ -93,9 +93,9 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
         if op.lower() == "click" or op.lower() == "hover" or op.lower() == "click (fake)":
             prediction = f"Action: click(start_box='({coordinates[0]}, {coordinates[1]})')"
         elif op.lower() == "type":
-            prediction = f"Action: type(content='({type_action_value})')"
+            prediction = f"Action: type(content='{type_action_value}')'"
         elif op.lower() == "press enter":
-            prediction = f"Action: type(content='(\\n)')"   
+            prediction = f"Action: type(content='\\n')'"
         elif op.lower() == "ignore":
             prediction = f"Action: wait()"
         
