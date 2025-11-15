@@ -58,7 +58,7 @@ deepspeed src/train/train_sft.py \
     --weight_decay 0.1 \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 5 \
+    --logging_steps 1 \
     --tf32 False \
     --gradient_checkpointing True \
     --report_to tensorboard \
