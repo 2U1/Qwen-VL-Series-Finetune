@@ -15,7 +15,7 @@ from transformers import (
 from src.trainer import QwenGRPOTrainer
 from src.dataset import make_grpo_data_module
 from src.params import DataArguments, ModelArguments, GRPOArguments
-from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
+from src.train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 from monkey_patch_forward import (
     replace_qwen2_5_with_mixed_modality_forward, 
     replace_qwen_2_with_mixed_modality_forward,

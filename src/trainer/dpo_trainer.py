@@ -10,7 +10,7 @@ from transformers.trainer import (
 )
 from trl import DPOTrainer
 from trl.trainer.utils import pad_to_length, flush_left, selective_log_softmax
-from train.train_utils import get_peft_state_non_lora_maybe_zero_3
+from src.train.train_utils import get_peft_state_non_lora_maybe_zero_3
 
 def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed import zero

@@ -8,7 +8,7 @@ from src.model import Qwen2VLForSequenceClassification, Qwen2_5_VLForSequenceCla
 from src.dataset import make_classification_data_module
 from src.loss import get_loss_function
 from src.params import DataArguments, ModelArguments, CLSArguments
-from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
+from src.train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import EarlyStoppingCallback
