@@ -217,6 +217,27 @@ processor, model = load_model_with_lora(
 # Script sẽ warning nhưng vẫn load được LoRA weights
 ```
 
+### Lỗi: "Expected all tensors to be on the same device"
+
+**Nguyên nhân:** Model được load trên multi-GPU và LoRA weights bị phân tán trên các GPU khác nhau
+
+**Giải pháp:** Load model lên 1 GPU cụ thể (mặc định là cuda:0):
+
+```python
+# Python
+processor, model = load_model_with_lora(
+    base_model_path="Qwen/Qwen2-VL-2B-Instruct",
+    lora_path="/kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-latest",
+    device="cuda:0"  # Force single GPU
+)
+
+# Command line (đã mặc định cuda:0)
+python scripts/inference.py \
+    --lora_path /path/to/checkpoint \
+    --video /path/to/video.mp4 \
+    --device cuda:0  # Optional, default is cuda:0
+```
+
 ### Lỗi: Out of Memory khi inference
 
 **Giải pháp:**

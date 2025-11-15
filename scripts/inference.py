@@ -16,7 +16,7 @@ import json
 def load_model_with_lora(
     base_model_path: str = "Qwen/Qwen2-VL-2B-Instruct",
     lora_path: str = None,
-    device: str = "cuda",
+    device: str = "cuda:0",
     dtype: torch.dtype = torch.float16
 ):
     """
@@ -25,14 +25,17 @@ def load_model_with_lora(
     Args:
         base_model_path: Path to base model (e.g., "Qwen/Qwen2-VL-2B-Instruct")
         lora_path: Path to checkpoint with LoRA weights (e.g., "checkpoints/.../checkpoint-latest")
-        device: Device to load model on
+        device: Device to load model on (default: "cuda:0" for single GPU)
         dtype: Data type for model weights
     """
     print(f"Loading base model from {base_model_path}...")
+    print(f"Target device: {device}")
+
+    # For inference, load to specific device to avoid multi-GPU issues
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         base_model_path,
         torch_dtype=dtype,
-        device_map="auto",
+        device_map={"": device},  # Force to single device
         trust_remote_code=True
     )
 
@@ -270,13 +273,20 @@ def main():
         type=int,
         help="Max number of samples to process (for testing)"
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0",
+        help="Device to load model on (default: cuda:0 for single GPU inference)"
+    )
 
     args = parser.parse_args()
 
     # Load model
     processor, model = load_model_with_lora(
         base_model_path=args.base_model,
-        lora_path=args.lora_path
+        lora_path=args.lora_path,
+        device=args.device
     )
 
     # Single video inference
