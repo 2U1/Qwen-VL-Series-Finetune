@@ -68,8 +68,7 @@ deepspeed src/train/train_sft.py \
     --save_steps 20 \
     --save_total_limit 1 \
     --save_latest_only True \
-    --dataloader_num_workers 1 \
-    --max_steps 300
+    --dataloader_num_workers 1
 
 echo "==========================================="
 echo "✅ Training completed!"
