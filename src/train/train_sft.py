@@ -289,18 +289,13 @@ def train():
                 if "merger" in name:
                     param.requires_grad = True
 
-        # Re-unfreeze LLM if freeze_llm=False (for Phase 2 training)
-        if not training_args.freeze_llm:
-            rank0_print("Re-enabling LLM parameters for Phase 2 training...")
-            for name, param in model.named_parameters():
-                # Unfreeze base LLM parameters (not LoRA adapters)
-                if "language_model" in name or "lm_head" in name:
-                    if "lora_" not in name:  # Don't touch LoRA adapters
-                        param.requires_grad = True
-
-        # Re-unfreeze top-k LLM layers if unfreeze_topk_llm > 0 (for Phase 2a incremental unfreezing)
+        # Re-unfreeze LLM layers after LoRA application
+        # Priority: if unfreeze_topk_llm > 0, ONLY unfreeze top-k (ignore freeze_llm flag)
+        # Otherwise, respect freeze_llm flag for full unfreezing
         k_llm = getattr(training_args, "unfreeze_topk_llm", 0)
+
         if k_llm > 0:
+            # Phase 2a: Incremental unfreezing - ONLY unfreeze top-k layers
             rank0_print(f"Re-enabling top {k_llm} LLM layers for incremental unfreezing...")
             # Access the base model through PEFT wrapper
             base_model = model.base_model if hasattr(model, 'base_model') else model
@@ -315,6 +310,14 @@ def train():
                     for name, p in layer.named_parameters():
                         if "lora_" not in name:  # Don't touch LoRA adapters
                             p.requires_grad = True
+        elif not training_args.freeze_llm:
+            # Phase 2: Full unfreezing - unfreeze ALL LLM parameters
+            rank0_print("Re-enabling ALL LLM parameters for Phase 2 training...")
+            for name, param in model.named_parameters():
+                # Unfreeze base LLM parameters (not LoRA adapters)
+                if "language_model" in name or "lm_head" in name:
+                    if "lora_" not in name:  # Don't touch LoRA adapters
+                        param.requires_grad = True
 
         # Explicitly ensure LoRA parameters are trainable
         # This is critical - without this, LoRA parameters may not have requires_grad=True
