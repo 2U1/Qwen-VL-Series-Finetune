@@ -166,27 +166,44 @@ RuntimeError: unexpected pos XXXXXXX vs XXXXXXX
 # Bạn không cần làm gì cả!
 ```
 
-**B. Nếu VẪN hết disk:**
+**B. Save Latest Only - Lưu đè checkpoint (Đã enable mặc định):**
+```bash
+# Scripts đã được config để chỉ giữ checkpoint mới nhất
+# Checkpoint được lưu vào folder cố định: "checkpoint-latest"
+# Mỗi lần save mới sẽ XÓA checkpoint cũ trước
+# → Chỉ tốn ~200MB disk space thay vì 400MB+
+
+--save_latest_only True  # Đã có trong script
+```
+
+**C. Nếu VẪN hết disk:**
 ```bash
 # 1. Tăng save_steps để lưu ít checkpoint hơn
---save_steps 50  # Thay vì 30
+--save_steps 50  # Thay vì 20
 
-# 2. Giảm save_total_limit
---save_total_limit 1  # Chỉ giữ 1 checkpoint mới nhất
-
-# 3. Kiểm tra disk space trước khi train
+# 2. Kiểm tra disk space trước khi train
 df -h /kaggle/working
 
-# 4. Xóa checkpoint cũ nếu cần
+# 3. Xóa checkpoint cũ nếu cần
 rm -rf /kaggle/working/checkpoints/*/checkpoint-*
 ```
 
-**C. Nếu MUỐN lưu non_lora_state_dict (không khuyến nghị):**
+**D. Nếu MUỐN lưu non_lora_state_dict (không khuyến nghị):**
 ```bash
 # Thêm flag này vào script
 --save_non_lora_weights True
 
 # Và đảm bảo có đủ dung lượng (ít nhất 5GB trống)
+```
+
+**E. Nếu MUỐN giữ nhiều checkpoint (tắt save_latest_only):**
+```bash
+# Xóa flag này khỏi script
+--save_latest_only True  # Bỏ dòng này
+
+# Khi đó checkpoints sẽ được lưu theo số step:
+# checkpoint-20/, checkpoint-40/, checkpoint-60/...
+# save_total_limit vẫn áp dụng để giới hạn số checkpoint
 ```
 
 ### 5. Checkpoint không được lưu
@@ -246,11 +263,11 @@ bash scripts/train_zac_kaggle.sh
 ```
 → Mất tối đa 20 steps (2-3 phút) khi timeout
 
-**2. Giảm save_total_limit:**
+**2. Dùng save_latest_only:**
 ```bash
---save_total_limit 1  # Chỉ giữ checkpoint mới nhất
+--save_latest_only True  # Lưu vào "checkpoint-latest", xóa cũ trước khi save mới
 ```
-→ Tiết kiệm disk space (~200MB thay vì 400MB)
+→ Tiết kiệm disk space (~200MB thay vì 400MB+)
 
 **3. Dùng max_steps thay vì num_epochs:**
 ```bash
@@ -292,7 +309,7 @@ bash scripts/kaggle_resume_helper.sh clean
 ### Những gì được lưu trong mỗi checkpoint:
 
 ```
-checkpoint-30/
+checkpoint-latest/          # Folder cố định (save_latest_only=True)
 ├── adapter_model.bin       # LoRA weights (~150MB) ✅
 ├── adapter_config.json     # LoRA config ✅
 ├── merger_weights.bin      # Merger weights (~20MB) ✅ NEW!
@@ -305,6 +322,12 @@ checkpoint-30/
 
 **Tổng dung lượng:** ~200MB/checkpoint (so với ~1GB trước đây!)
 
+**Lưu ý về save_latest_only:**
+- Khi `--save_latest_only True`, checkpoint luôn được lưu vào folder `checkpoint-latest`
+- Mỗi lần save mới, folder cũ sẽ bị XÓA hoàn toàn trước khi tạo folder mới
+- Điều này đảm bảo chỉ có **1 checkpoint** tồn tại tại mọi thời điểm
+- Nếu tắt save_latest_only, checkpoints sẽ được lưu theo số step: `checkpoint-20`, `checkpoint-40`, etc.
+
 ### Resume training tự động:
 
 Training sẽ **TỰ ĐỘNG resume** nếu tìm thấy checkpoint:
@@ -314,9 +337,12 @@ Training sẽ **TỰ ĐỘNG resume** nếu tìm thấy checkpoint:
 bash scripts/train_zac_kaggle.sh
 
 # Output sẽ hiện:
-# "Resuming from checkpoint: /kaggle/working/checkpoints/.../checkpoint-30"
+# "Resuming from checkpoint: /kaggle/working/checkpoints/.../checkpoint-latest"
 # "Loading merger weights from .../merger_weights.bin"
 # "Successfully loaded 6 merger parameters"
+
+# Lưu ý: Nếu dùng save_latest_only=True, checkpoint folder sẽ là "checkpoint-latest"
+# Nếu không, sẽ là "checkpoint-{step}" như checkpoint-300
 ```
 
 ### Resume thủ công từ checkpoint cụ thể:
@@ -386,7 +412,9 @@ processor = AutoProcessor.from_pretrained(
 | Epochs | 3 | 3 |
 | video_min_pixels | 360,448 | 263,424 |
 | video_max_pixels | 635,376 | 329,280 |
-| Save steps | 30 | 30 |
+| Save steps | 20 | 20 |
+| Save latest only | True ✅ | True ✅ |
+| Checkpoint folder | checkpoint-latest | checkpoint-latest |
 | DeepSpeed config | zero2.json | zero2_offload.json |
 | Est. training time | ~8-9h | ~9-10h |
 | OOM risk | Thấp ✅ | Cao ⚠️ |

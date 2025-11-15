@@ -143,13 +143,24 @@ class QwenSFTTrainer(Trainer):
 
         # Save model checkpoint
         if self.args.lora_enable:
-            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            # Use fixed folder name if save_latest_only is enabled (saves disk space)
+            if getattr(self.args, 'save_latest_only', False):
+                checkpoint_folder = "checkpoint-latest"
+            else:
+                checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
 
             if self.hp_search_backend is None and trial is None:
                 self.store_flos()
 
             run_dir = self._get_output_dir(trial=trial)
             output_dir = os.path.join(run_dir, checkpoint_folder)
+
+            # If save_latest_only, remove old checkpoint first to save space
+            if getattr(self.args, 'save_latest_only', False) and os.path.exists(output_dir):
+                import shutil
+                logger.info(f"Removing old checkpoint to save disk space: {output_dir}")
+                shutil.rmtree(output_dir)
+
             self.save_model(output_dir, _internal_call=True)
 
             # Save non-LoRA trainable weights (e.g., merger) separately

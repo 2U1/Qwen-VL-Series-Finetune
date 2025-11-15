@@ -13,10 +13,14 @@ save_checkpoint_to_output() {
     echo "Saving checkpoint to Kaggle output..."
     echo "==========================================="
 
-    # Find latest checkpoint
-    LATEST=$(ls -td ${CHECKPOINT_DIR}/checkpoint-* 2>/dev/null | head -1)
+    # Find latest checkpoint (check for checkpoint-latest first, then numbered)
+    if [ -d "${CHECKPOINT_DIR}/checkpoint-latest" ]; then
+        LATEST="${CHECKPOINT_DIR}/checkpoint-latest"
+    else
+        LATEST=$(ls -td ${CHECKPOINT_DIR}/checkpoint-* 2>/dev/null | head -1)
+    fi
 
-    if [ -z "$LATEST" ]; then
+    if [ -z "$LATEST" ] || [ ! -d "$LATEST" ]; then
         echo "❌ No checkpoint found!"
         return 1
     fi
@@ -26,8 +30,14 @@ save_checkpoint_to_output() {
     # Create output directory
     mkdir -p ${OUTPUT_DIR}
 
-    # Copy only essential files (skip optimizer to save space)
-    CHECKPOINT_NAME=$(basename $LATEST)
+    # Get current step from trainer_state.json
+    if [ -f "${LATEST}/trainer_state.json" ]; then
+        GLOBAL_STEP=$(python3 -c "import json; f=open('${LATEST}/trainer_state.json'); d=json.load(f); print(d.get('global_step', 'unknown'))" 2>/dev/null || echo "unknown")
+        CHECKPOINT_NAME="checkpoint-${GLOBAL_STEP}"
+    else
+        CHECKPOINT_NAME=$(basename $LATEST)
+    fi
+
     mkdir -p ${OUTPUT_DIR}/${CHECKPOINT_NAME}
 
     echo "Copying essential files..."
