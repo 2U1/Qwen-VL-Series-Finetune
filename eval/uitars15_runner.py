@@ -20,11 +20,15 @@ Set environment variables before running:
 import argparse
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from eval.episode_loader import load_episode
 from eval.uitars15_v1 import UITARSAgent, compute_step_metrics
+
+
+STEP_METRIC_KEYS = ("action_str_em", "hit_box_accuracy", "bbox_center_mse")
 
 
 def build_runtime_conf(args: argparse.Namespace) -> Dict[str, Any]:
@@ -143,8 +147,8 @@ def main() -> None:
 
         # Aggregators
         steps = 0
-        sum_elem_acc = 0.0
-        sum_op_f1 = 0.0
+        metric_totals = defaultdict(float)
+        metric_counts = defaultdict(int)
 
         step_index = 0
         for instruction, obs, metadata in load_episode(
@@ -180,7 +184,7 @@ def main() -> None:
                     min_pixels=args.min_pixels
                 )
             except Exception as _:
-                metrics = {"element_accuracy": 0.0, "operation_f1": 0.0}
+                metrics = {key: None for key in STEP_METRIC_KEYS}
 
             is_terminal = False
             if prediction == "client error" or actions in [["DONE"], ["FAIL"]]:
@@ -193,9 +197,16 @@ def main() -> None:
                     print(f"[runner] Task failed at step={step_index}")
             print(f"[runner] episode={ep_dir.name} step={step_index}")
             print(f"[runner] instruction={instruction}")
+            metric_parts = []
+            for key in STEP_METRIC_KEYS:
+                value = metrics.get(key)
+                if value is None:
+                    metric_parts.append(f"{key}=NA")
+                else:
+                    metric_parts.append(f"{key}={value:.3f}")
             print(f"[runner] prediction={prediction}")
             print(f"[runner] actions={actions}")
-            print(f"[runner] metrics element_acc={metrics['element_accuracy']:.3f} op_f1={metrics['operation_f1']:.3f}")
+            print(f"[runner] metrics {' '.join(metric_parts)}")
             if jsonl_file is not None:
                 record = {
                     "episode": ep_dir.name,
@@ -211,25 +222,36 @@ def main() -> None:
                 mrec = {
                     "episode": ep_dir.name,
                     "step_index": step_index,
-                    "element_accuracy": metrics["element_accuracy"],
-                    "operation_f1": metrics["operation_f1"],
                     "op": metadata.get("op"),
+                    "ground_truth_actions": metadata.get("uitars_actions", []),
+                    "metrics": metrics,
                 }
                 metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
                 metrics_file.flush()
 
             steps += 1
-            sum_elem_acc += float(metrics["element_accuracy"])
-            sum_op_f1 += float(metrics["operation_f1"])
+            for key, value in metrics.items():
+                if value is None:
+                    continue
+                metric_totals[key] += float(value)
+                metric_counts[key] += 1
             step_index += 1
             if is_terminal:
                 print(f"[runner] Stopping evaluation due to terminal state.")
                 break
 
-        avg_elem = (sum_elem_acc / steps) if steps > 0 else 0.0
-        avg_f1 = (sum_op_f1 / steps) if steps > 0 else 0.0
-        print(f"[runner] Completed {step_index} steps for episode={ep_dir.name}. "
-              f"avg_element_acc={avg_elem:.3f} avg_operation_f1={avg_f1:.3f}")
+        summary_parts = []
+        for key in STEP_METRIC_KEYS:
+            count = metric_counts.get(key, 0)
+            if count == 0:
+                summary_parts.append(f"{key}=NA")
+            else:
+                avg = metric_totals[key] / count
+                summary_parts.append(f"{key}={avg:.3f} (n={count})")
+        print(
+            f"[runner] Completed {step_index} steps for episode={ep_dir.name}. "
+            + " ".join(summary_parts)
+        )
 
     if args.episode_dir:
         episode_dir = Path(args.episode_dir)

@@ -9,7 +9,9 @@ Usage:
 """
 import json
 from pathlib import Path
-from typing import Dict, Iterator, Tuple, Optional
+from typing import Dict, Iterator, Tuple, Optional, List, Union
+
+from eval.mind2web_mapping import mind2web_step_to_uitars
 
 
 def _resolve_screenshot_path(step_screenshot: str, episode_dir: Path) -> Optional[Path]:
@@ -21,6 +23,29 @@ def _resolve_screenshot_path(step_screenshot: str, episode_dir: Path) -> Optiona
     fallback = screenshots_dir / Path(step_screenshot).name
     if fallback.is_file():
         return fallback
+    return None
+
+
+def _target_point_from_step(step: Dict) -> Optional[Tuple[float, float]]:
+    """
+    Resolve a best-effort target point for the step.
+    Preference order:
+      1. `coordinates` first (explicit click point)
+      2. Center of `bounding_box`
+    """
+    coords: List[Union[int, float]] = step.get("coordinates") or []
+    if len(coords) >= 2:
+        try:
+            return float(coords[0]), float(coords[1])
+        except (TypeError, ValueError):
+            pass
+    bbox: List[Union[int, float]] = step.get("bounding_box") or []
+    if len(bbox) >= 4:
+        try:
+            x, y, w, h = map(float, bbox[:4])
+            return x + w / 2.0, y + h / 2.0
+        except (TypeError, ValueError):
+            return None
     return None
 
 
@@ -120,6 +145,16 @@ def load_episode(
         
         obs = {"screenshot": screenshot_bytes, "accessibility_tree": None}
 
-        yield instruction, obs, step
+        annotated_step = dict(step)
+        try:
+            uitars_actions = mind2web_step_to_uitars(step)
+        except Exception as e:
+            raise RuntimeError(f"Step {step_idx}: Failed to convert to UITARS actions: {e}") from e
+        annotated_step["uitars_actions"] = uitars_actions
+        target_point = _target_point_from_step(step)
+        if target_point is not None:
+            annotated_step["target_point"] = target_point
+
+        yield instruction, obs, annotated_step
 
 
