@@ -198,6 +198,95 @@ rm -rf /kaggle/working/checkpoints/*/checkpoint-*
 ls -lh /kaggle/working/checkpoints/zac_qwen2vl_lora/
 ```
 
+## Multi-Session Training cho Kaggle 12h Timeout
+
+### Vấn đề:
+- Kaggle giới hạn **12h** mỗi session
+- Training đầy đủ cần ~8-9h cho 3 epochs
+- Nếu crash/timeout → Mất nhiều giờ progress
+
+### Strategy: Train theo từng "chunk"
+
+Thay vì train hết một lúc, chia thành nhiều session nhỏ:
+
+**Session 1: 0 → 300 steps (~10h)**
+```bash
+bash scripts/train_zac_kaggle.sh  # max_steps=300
+```
+
+**Sau session 1:**
+```bash
+# 1. Lưu checkpoint ra output
+bash scripts/kaggle_resume_helper.sh save
+
+# 2. Upload /kaggle/working/outputs lên Kaggle Dataset mới
+#    Name: "zac-checkpoint-300" hoặc tương tự
+```
+
+**Session 2: Resume từ 300 → 600 steps**
+```bash
+# 1. Add checkpoint dataset làm input
+# 2. Copy checkpoint vào working directory
+cp -r /kaggle/input/zac-checkpoint-300/checkpoint-* /kaggle/working/checkpoints/zac_qwen2vl_lora/
+
+# 3. Sửa max_steps trong script
+--max_steps 600  # Train thêm 300 steps nữa
+
+# 4. Run lại
+bash scripts/train_zac_kaggle.sh
+```
+
+**Lặp lại cho đến khi đủ steps/epochs mong muốn**
+
+### Tối ưu hóa cho multi-session:
+
+**1. Giảm save_steps:**
+```bash
+--save_steps 20  # Thay vì 30
+```
+→ Mất tối đa 20 steps (2-3 phút) khi timeout
+
+**2. Giảm save_total_limit:**
+```bash
+--save_total_limit 1  # Chỉ giữ checkpoint mới nhất
+```
+→ Tiết kiệm disk space (~200MB thay vì 400MB)
+
+**3. Dùng max_steps thay vì num_epochs:**
+```bash
+--max_steps 300  # Dễ track progress hơn
+# Thay vì --num_train_epochs 3
+```
+
+**4. Helper commands:**
+```bash
+# Kiểm tra progress
+bash scripts/kaggle_resume_helper.sh check
+
+# Lưu checkpoint để upload
+bash scripts/kaggle_resume_helper.sh save
+
+# Dọn dẹp disk space
+bash scripts/kaggle_resume_helper.sh clean
+```
+
+### Ước tính thời gian:
+
+| Steps | Time | Progress | Disk Space |
+|-------|------|----------|------------|
+| 0-300 | ~10h | 1 epoch | 200MB |
+| 300-600 | ~10h | 2 epochs | 200MB |
+| 600-900 | ~10h | 3 epochs | 200MB |
+
+→ **3 sessions × 10h = Full training**
+
+### Lợi ích:
+
+✅ **An toàn:** Mất tối đa 20 steps khi crash
+✅ **Linh hoạt:** Pause/resume bất kỳ lúc nào
+✅ **Track được:** Biết chính xác đang ở step nào
+✅ **Disk efficient:** Chỉ cần 200MB cho 1 checkpoint
+
 ## Resume Training
 
 ### Những gì được lưu trong mỗi checkpoint:

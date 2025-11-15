@@ -65,9 +65,10 @@ deepspeed src/train/train_sft.py \
     --logging_dir /kaggle/working/logs \
     --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 30 \
-    --save_total_limit 2 \
-    --dataloader_num_workers 1
+    --save_steps 20 \
+    --save_total_limit 1 \
+    --dataloader_num_workers 1 \
+    --max_steps 300
 
 echo "==========================================="
 echo "✅ Training completed!"
