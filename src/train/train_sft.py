@@ -313,8 +313,34 @@ def train():
         **data_module
     )
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
+    # Check for existing checkpoints
+    checkpoints = sorted(pathlib.Path(training_args.output_dir).glob("checkpoint-*"),
+                        key=lambda x: int(x.name.split("-")[1]))
+
+    if checkpoints:
+        latest_checkpoint = str(checkpoints[-1])
+        rank0_print(f"Resuming from checkpoint: {latest_checkpoint}")
+
+        # Load merger weights if they exist
+        merger_weights_path = pathlib.Path(latest_checkpoint) / "merger_weights.bin"
+        if merger_weights_path.exists() and not training_args.freeze_merger:
+            rank0_print(f"Loading merger weights from {merger_weights_path}")
+            merger_weights = torch.load(merger_weights_path, map_location="cpu")
+
+            # Load merger weights into model
+            missing_keys = []
+            for name, param in model.named_parameters():
+                if name in merger_weights:
+                    param.data.copy_(merger_weights[name])
+                elif "merger" in name and param.requires_grad:
+                    missing_keys.append(name)
+
+            if missing_keys:
+                rank0_print(f"WARNING: {len(missing_keys)} merger parameters not found in checkpoint")
+            else:
+                rank0_print(f"Successfully loaded {len(merger_weights)} merger parameters")
+
+        trainer.train(resume_from_checkpoint=latest_checkpoint)
     else:
         trainer.train()
 
@@ -332,8 +358,19 @@ def train():
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             processor.save_pretrained(training_args.output_dir)
 
-            # Only save non_lora_state_dict if explicitly enabled via save_non_lora_weights argument
-            # This file is very large (~500MB) and can cause disk space issues on platforms with limited storage
+            # Save merger weights separately (much smaller than full non_lora_state_dict)
+            if not training_args.freeze_merger:
+                from src.trainer.sft_trainer import maybe_zero_3
+                merger_weights = {}
+                for name, param in model.named_parameters():
+                    if "merger" in name and param.requires_grad:
+                        merger_weights[name] = maybe_zero_3(param, ignore_status=True, name=name)
+                if merger_weights:
+                    torch.save(merger_weights, os.path.join(training_args.output_dir, "merger_weights.bin"))
+                    rank0_print(f"Saved {len(merger_weights)} merger parameters to final checkpoint")
+
+            # Only save full non_lora_state_dict if explicitly enabled
+            # This file is very large (~500MB) and usually not needed
             if getattr(training_args, 'save_non_lora_weights', False):
                 non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
                     model.named_parameters(), require_grad_only=True

@@ -198,6 +198,88 @@ rm -rf /kaggle/working/checkpoints/*/checkpoint-*
 ls -lh /kaggle/working/checkpoints/zac_qwen2vl_lora/
 ```
 
+## Resume Training
+
+### Những gì được lưu trong mỗi checkpoint:
+
+```
+checkpoint-30/
+├── adapter_model.bin       # LoRA weights (~150MB) ✅
+├── adapter_config.json     # LoRA config ✅
+├── merger_weights.bin      # Merger weights (~20MB) ✅ NEW!
+├── optimizer.pt           # Optimizer state ✅
+├── scheduler.pt           # Scheduler state ✅
+├── trainer_state.json     # Training progress ✅
+├── rng_state.pth         # Random states ✅
+└── config.json           # Model config ✅
+```
+
+**Tổng dung lượng:** ~200MB/checkpoint (so với ~1GB trước đây!)
+
+### Resume training tự động:
+
+Training sẽ **TỰ ĐỘNG resume** nếu tìm thấy checkpoint:
+
+```bash
+# Chỉ cần chạy lại script
+bash scripts/train_zac_kaggle.sh
+
+# Output sẽ hiện:
+# "Resuming from checkpoint: /kaggle/working/checkpoints/.../checkpoint-30"
+# "Loading merger weights from .../merger_weights.bin"
+# "Successfully loaded 6 merger parameters"
+```
+
+### Resume thủ công từ checkpoint cụ thể:
+
+```python
+# Trong Python notebook
+from peft import PeftModel
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+# 1. Load base model
+model = Qwen2VLForConditionalGeneration.from_pretrained(
+    "Qwen/Qwen2-VL-2B-Instruct",
+    torch_dtype=torch.float16
+)
+
+# 2. Load LoRA weights
+model = PeftModel.from_pretrained(
+    model,
+    "/kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-30"
+)
+
+# 3. Load merger weights (nếu có)
+merger_path = "/kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-30/merger_weights.bin"
+if os.path.exists(merger_path):
+    merger_weights = torch.load(merger_path)
+    model.load_state_dict(merger_weights, strict=False)
+
+# 4. Load processor
+processor = AutoProcessor.from_pretrained(
+    "/kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-30"
+)
+```
+
+### Files CẦN giữ lại để resume:
+
+**Tối thiểu (chỉ inference):**
+- ✅ `adapter_model.bin` - LoRA weights
+- ✅ `adapter_config.json` - LoRA config
+- ✅ `merger_weights.bin` - Merger weights (nếu train merger)
+- ✅ `config.json` - Model config
+
+**Đầy đủ (resume training):**
+- ✅ Tất cả files trên
+- ✅ `optimizer.pt` - Để tiếp tục optimize đúng
+- ✅ `scheduler.pt` - Để LR schedule đúng
+- ✅ `trainer_state.json` - Để biết đang ở step nào
+
+### Files KHÔNG cần thiết:
+
+- ❌ `non_lora_state_dict.bin` (~500MB) - Đã được thay bằng `merger_weights.bin`
+- ❌ Checkpoint cũ - Chỉ cần giữ 1-2 checkpoint mới nhất
+
 ## Configuration chính
 
 ### So sánh 1 GPU vs 2 GPUs
