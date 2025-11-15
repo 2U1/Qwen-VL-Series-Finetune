@@ -151,8 +151,12 @@ class QwenSFTTrainer(Trainer):
             run_dir = self._get_output_dir(trial=trial)
             output_dir = os.path.join(run_dir, checkpoint_folder)
             self.save_model(output_dir, _internal_call=True)
-            non_lora_weights = get_peft_state_non_lora_maybe_zero_3(self.model.named_parameters(), require_grad_only=False)
-            torch.save(non_lora_weights, os.path.join(output_dir, "non_lora_state_dict.bin"))
+
+            # Only save non_lora_state_dict if explicitly enabled
+            # This file is very large (~500MB) and can cause disk space issues
+            if getattr(self.args, 'save_non_lora_weights', False):
+                non_lora_weights = get_peft_state_non_lora_maybe_zero_3(self.model.named_parameters(), require_grad_only=False)
+                torch.save(non_lora_weights, os.path.join(output_dir, "non_lora_state_dict.bin"))
 
             if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and self.state.best_global_step:
                 best_checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.best_global_step}"

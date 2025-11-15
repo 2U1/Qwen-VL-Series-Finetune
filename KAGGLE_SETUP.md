@@ -141,11 +141,59 @@ GLOBAL_BATCH_SIZE=4  # Giảm từ 8 xuống 4
 --video_max_pixels $((17 * 14 * 4 * 28 * 28))          # = 702,464 ❌
 ```
 
-### 4. Checkpoint không được lưu
+### 4. Disk Full - File write failed khi lưu checkpoint
+
+**Nguyên nhân:** Kaggle working directory hết dung lượng (~20GB)
+
+**Triệu chứng:**
+```
+RuntimeError: PytorchStreamWriter failed writing file data/XXX: file write failed
+RuntimeError: unexpected pos XXXXXXX vs XXXXXXX
+```
+
+**Nguyên nhân chi tiết:**
+- Mỗi checkpoint lưu `non_lora_state_dict.bin` (~500MB)
+- Với 2 GPUs: 2 processes × 500MB = 1GB/checkpoint
+- Videos trong `/kaggle/working/` chiếm nhiều dung lượng
+- Multiple checkpoints × 1GB = Disk full!
+
+**Giải pháp:**
+
+**A. Mặc định - Không lưu non_lora_state_dict (Đã fix):**
+```bash
+# Scripts đã được update để skip file này
+# Chỉ lưu LoRA weights (nhỏ hơn nhiều)
+# Bạn không cần làm gì cả!
+```
+
+**B. Nếu VẪN hết disk:**
+```bash
+# 1. Tăng save_steps để lưu ít checkpoint hơn
+--save_steps 50  # Thay vì 30
+
+# 2. Giảm save_total_limit
+--save_total_limit 1  # Chỉ giữ 1 checkpoint mới nhất
+
+# 3. Kiểm tra disk space trước khi train
+df -h /kaggle/working
+
+# 4. Xóa checkpoint cũ nếu cần
+rm -rf /kaggle/working/checkpoints/*/checkpoint-*
+```
+
+**C. Nếu MUỐN lưu non_lora_state_dict (không khuyến nghị):**
+```bash
+# Thêm flag này vào script
+--save_non_lora_weights True
+
+# Và đảm bảo có đủ dung lượng (ít nhất 5GB trống)
+```
+
+### 5. Checkpoint không được lưu
 
 **Nguyên nhân:** Process bị kill trước khi lưu
 
-**Giải pháp:** Script đã được config để lưu mỗi 50 steps. Kiểm tra:
+**Giải pháp:** Script đã được config để lưu thường xuyên. Kiểm tra:
 ```bash
 ls -lh /kaggle/working/checkpoints/zac_qwen2vl_lora/
 ```

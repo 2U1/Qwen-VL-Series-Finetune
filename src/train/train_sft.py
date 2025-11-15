@@ -327,15 +327,18 @@ def train():
             model.named_parameters(), training_args.lora_bias
         )
 
-        non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
-            model.named_parameters(), require_grad_only=True
-        )
-
         if local_rank == 0 or local_rank == -1:
             model.config.save_pretrained(training_args.output_dir)
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             processor.save_pretrained(training_args.output_dir)
-            torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
+
+            # Only save non_lora_state_dict if explicitly enabled via save_non_lora_weights argument
+            # This file is very large (~500MB) and can cause disk space issues on platforms with limited storage
+            if getattr(training_args, 'save_non_lora_weights', False):
+                non_lora_state_dict = get_peft_state_non_lora_maybe_zero_3(
+                    model.named_parameters(), require_grad_only=True
+                )
+                torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
     else:
         safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
 
