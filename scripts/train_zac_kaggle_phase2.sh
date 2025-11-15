@@ -40,7 +40,7 @@ cp -r "$RESUME_FROM"/* "$OUTPUT_DIR/"
 echo "✅ Checkpoint copied"
 
 # Start training with UNFROZEN LLM
-deepspeed src/train/train_sft.py \
+deepspeed --num_gpus=$NUM_DEVICES src/train/train_sft.py \
     --use_liger True \
     --deepspeed scripts/zero2.json \
     --model_id "$MODEL_NAME" \

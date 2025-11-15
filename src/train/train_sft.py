@@ -143,9 +143,6 @@ def train():
     if data_args.nframes is not None and data_args.fps is not None:
         raise ValueError("You cannot set both `nframes` and `fps` at the same time. Please set only one of them.")
 
-    if training_args.lora_enable and not training_args.freeze_llm:
-        raise ValueError("If `lora_enable` is True, `freeze_llm` must also be True.")
-
     if not training_args.lora_enable:
         assert not training_args.vision_lora, \
             "Error: training_args.lora_enable is not enabled, but training_args.vision_lora is enabled."

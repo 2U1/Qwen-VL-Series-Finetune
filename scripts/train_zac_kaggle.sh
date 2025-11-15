@@ -30,7 +30,7 @@ echo "Gradient Accumulation: $GRAD_ACCUM_STEPS"
 echo "==========================================="
 
 # Start the training with DeepSpeed and the configured parameters
-deepspeed src/train/train_sft.py \
+deepspeed --num_gpus=$NUM_DEVICES src/train/train_sft.py \
     --use_liger True \
     --deepspeed scripts/zero2.json \
     --model_id "$MODEL_NAME" \
