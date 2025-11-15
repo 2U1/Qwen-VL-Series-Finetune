@@ -21,6 +21,89 @@ checkpoints/zac_qwen2vl_lora/checkpoint-latest/
 - `merger_weights.bin`: Weights của merger layer (vì bạn train với `freeze_merger=False`)
 - Cả 2 files này đều cần thiết để load model đúng!
 
+## Đánh giá Multiple Choice Questions (MCQ)
+
+Nếu dataset của bạn là dạng **multiple choice** (có các lựa chọn A/B/C/D), dùng script `inference_mcq.py` để tự động extract answer và tính accuracy:
+
+### Quick evaluation trên Kaggle:
+
+```bash
+cd /kaggle/working/Qwen-VL-Series-Finetune
+bash scripts/kaggle_evaluate.sh
+```
+
+Script này sẽ:
+1. Chạy inference trên toàn bộ dataset
+2. Tự động extract answer (A/B/C/D) từ response
+3. So sánh với ground truth
+4. Tính accuracy
+5. Save kết quả vào `/kaggle/working/evaluation_results.json`
+
+### Test trên một vài samples:
+
+```bash
+python scripts/inference_mcq.py \
+    --base_model Qwen/Qwen2-VL-2B-Instruct \
+    --lora_path /kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-latest \
+    --data_path /kaggle/input/600sample-real/llava_training_data.json \
+    --video_folder /kaggle/input/train-zaic \
+    --output /kaggle/working/eval_test.json \
+    --max_samples 10  # Chỉ test 10 samples
+```
+
+### Evaluate trong Python:
+
+```python
+import sys
+sys.path.append('/kaggle/working/Qwen-VL-Series-Finetune')
+
+from scripts.inference_mcq import load_model_with_lora, batch_evaluate_mcq
+
+# Load model
+processor, model = load_model_with_lora(
+    base_model_path="Qwen/Qwen2-VL-2B-Instruct",
+    lora_path="/kaggle/working/checkpoints/zac_qwen2vl_lora/checkpoint-latest",
+    device="cuda:0"
+)
+
+# Run evaluation
+results, accuracy = batch_evaluate_mcq(
+    processor, model,
+    data_path="/kaggle/input/600sample-real/llava_training_data.json",
+    video_folder="/kaggle/input/train-zaic",
+    output_path="/kaggle/working/eval_results.json",
+    max_samples=50  # Test on 50 samples
+)
+
+print(f"Accuracy: {accuracy:.2%}")
+```
+
+### Format output:
+
+File `evaluation_results.json` có format:
+
+```json
+{
+  "accuracy": 0.85,
+  "correct": 85,
+  "total": 100,
+  "results": [
+    {
+      "id": "zac_video_000001",
+      "video": "videos/001a9a8b_340_clip_006_0037_0046_Y.mp4",
+      "question": "Phần đường trong video...",
+      "full_response": "1. QUAN SÁT: ...\n2. QUY TẮC: ...\n3. KẾT LUẬN:\n4. Đáp án: C",
+      "predicted_answer": "C",
+      "ground_truth_answer": "C",
+      "correct": true
+    },
+    ...
+  ]
+}
+```
+
+---
+
 ## Cách 1: Inference trên 1 video
 
 ### Trên Kaggle:
