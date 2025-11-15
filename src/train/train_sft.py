@@ -84,6 +84,30 @@ def unfreeze_topk_layers(model, k_llm: int = 0, k_vis: int = 0):
             for p in blk.parameters():
                 p.requires_grad = True
 
+def print_trainable_parameters(model):
+    """
+    Prints the number of trainable parameters in the model.
+    """
+    trainable_params = 0
+    all_param = 0
+    trainable_param_names = []
+    for name, param in model.named_parameters():
+        all_param += param.numel()
+        if param.requires_grad:
+            trainable_params += param.numel()
+            trainable_param_names.append(name)
+
+    rank0_print(
+        f"trainable params: {trainable_params:,} || all params: {all_param:,} || trainable%: {100 * trainable_params / all_param:.2f}"
+    )
+    if trainable_params == 0:
+        rank0_print("WARNING: No trainable parameters found!")
+        rank0_print("This will result in learning_rate=0.0 and grad_norm=0.0")
+    else:
+        rank0_print(f"Trainable parameter names (first 10): {trainable_param_names[:10]}")
+
+    return trainable_params
+
 
 def train():
     global local_rank
@@ -192,13 +216,13 @@ def train():
         k_vis=getattr(training_args, "unfreeze_topk_vision", 0),
     )
 
+    # Set gradient checkpointing kwargs but DON'T enable_input_require_grads yet
+    # We'll do that after LoRA is applied
     if training_args.gradient_checkpointing:
         if training_args.vision_lora:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
         else:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
-        
-        model.enable_input_require_grads()
 
     if training_args.bits in [4,8]:
         model.config.dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
@@ -222,8 +246,8 @@ def train():
         rank0_print("Adding LoRA to the model...")
         model = get_peft_model(model, peft_config)
 
-        # Peft maodel makes vision tower and merger freezed again.
-        # Configuring fuction could be called here, but sometimes it does not work properly.
+        # Peft model makes vision tower and merger freezed again.
+        # Configuring function could be called here, but sometimes it does not work properly.
         # So I just made it this way.
         # Need to be fixed in the future.
 
@@ -236,6 +260,29 @@ def train():
             for name, param in model.named_parameters():
                 if "merger" in name:
                     param.requires_grad = True
+
+        # Explicitly ensure LoRA parameters are trainable
+        # This is critical - without this, LoRA parameters may not have requires_grad=True
+        rank0_print("Ensuring LoRA parameters are trainable...")
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True
+
+        # NOW enable input require grads for gradient checkpointing
+        # This must be done AFTER LoRA is applied
+        if training_args.gradient_checkpointing:
+            model.enable_input_require_grads()
+
+        # Print trainable parameters to verify
+        rank0_print("=" * 50)
+        trainable_count = print_trainable_parameters(model)
+        rank0_print("=" * 50)
+
+        if trainable_count == 0:
+            raise ValueError(
+                "No trainable parameters found! This will cause learning_rate=0.0. "
+                "Please check your freeze settings and LoRA configuration."
+            )
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
 
