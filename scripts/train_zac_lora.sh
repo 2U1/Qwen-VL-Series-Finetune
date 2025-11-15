@@ -58,11 +58,11 @@ deepspeed src/train/train_sft.py \
     --gradient_checkpointing True \
     --report_to tensorboard \
     --logging_dir ./logs \
-    --lazy_preprocess False \
+    --lazy_preprocess True \
     --save_strategy "steps" \
-    --save_steps 200 \
+    --save_steps 50 \
     --save_total_limit 2 \
-    --dataloader_num_workers 2
+    --dataloader_num_workers 1
 
 echo "==========================================="
 echo "✅ Training completed!"
