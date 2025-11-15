@@ -84,10 +84,8 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
         # Skip if any of these necessary fields is missing
         if step_instruction is None or op is None or coordinates is None:
             continue
-
-        # Format prompt - include <image> token for each image
-        image_tokens = "".join(["<image>\n" for _ in image_paths])
-        prompt = f"{image_tokens}{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
+        
+        prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
 
         # Mind2Web has actions: Click, Type, Hover, Press Enter, Click (Fake) and Ignore. 
         # Map these actions to the UI Tars actions
