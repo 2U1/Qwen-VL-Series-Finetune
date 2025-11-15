@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import shutil
 from pathlib import Path
 
 UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
@@ -23,7 +24,7 @@ call_user() # Submit the task and call the user when the task is unsolvable, or 
 {instruction}
 """
 
-def process_subdirectory(subdir_path, subdir_name):
+def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
     """Process a single subdirectory containing trajectory.json and screenshots."""
     trajectory_path = os.path.join(subdir_path, "trajectory.json")
     screenshots_path = os.path.join(subdir_path, "screenshots")
@@ -55,8 +56,21 @@ def process_subdirectory(subdir_path, subdir_name):
         print(f"  Warning: No screenshots found in {screenshots_path}, skipping...")
         return None
     
-    # Build image paths list
-    image_paths = [os.path.join(screenshots_path, f) for f in screenshot_files]
+    # Copy screenshots to output directory with prepended subdirectory name
+    image_paths = []
+    for screenshot_file in screenshot_files:
+        src_path = os.path.join(screenshots_path, screenshot_file)
+        # Prepend subdirectory name to make filename unique
+        new_filename = f"{subdir_name}_{screenshot_file}"
+        dst_path = os.path.join(output_screenshots_dir, new_filename)
+        
+        try:
+            shutil.copy2(src_path, dst_path)
+            # Store relative path from data directory
+            image_paths.append(os.path.join("screenshots", new_filename))
+        except Exception as e:
+            print(f"  Warning: Failed to copy {src_path} to {dst_path}: {e}")
+            continue
     
     # Build conversations list with one human/gpt pair per trajectory step
     conversations = []
@@ -158,6 +172,17 @@ def main():
     else:
         print(f"Found {len(subdirectories)} subdirectories to process")
     
+    # Create output directories
+    current_dir = os.getcwd()
+    output_data_dir = os.path.join(current_dir, "data")
+    output_screenshots_dir = os.path.join(output_data_dir, "screenshots")
+    
+    # Create directories if they don't exist
+    os.makedirs(output_data_dir, exist_ok=True)
+    os.makedirs(output_screenshots_dir, exist_ok=True)
+    print(f"\nOutput directory: {output_data_dir}")
+    print(f"Screenshots will be copied to: {output_screenshots_dir}")
+    
     # Process each subdirectory
     all_training_data = []
     
@@ -165,7 +190,7 @@ def main():
         subdir_path = os.path.join(parent_directory, subdir_name)
         print(f"\nProcessing: {subdir_name}")
         
-        entry = process_subdirectory(subdir_path, subdir_name)
+        entry = process_subdirectory(subdir_path, subdir_name, output_screenshots_dir)
         
         if entry is not None:
             all_training_data.append(entry)
@@ -176,14 +201,15 @@ def main():
     print(f"\n{'='*60}")
     print(f"Total training examples collected: {len(all_training_data)}")
     
-    # Define output path (in parent directory or current directory)
-    output_file_path = os.path.join(parent_directory, "training_data.json")
+    # Define output path in the data directory
+    output_file_path = os.path.join(output_data_dir, "training_data.json")
     
     # Write the training_data to the JSON file
     with open(output_file_path, 'w') as f:
         json.dump(all_training_data, f, indent=4)
     
     print(f"Successfully wrote training data to {output_file_path}")
+    print(f"Copied {sum(len(entry['image']) for entry in all_training_data)} screenshots to {output_screenshots_dir}")
 
 
 if __name__ == "__main__":
