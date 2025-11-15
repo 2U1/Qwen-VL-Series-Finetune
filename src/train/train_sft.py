@@ -86,26 +86,57 @@ def unfreeze_topk_layers(model, k_llm: int = 0, k_vis: int = 0):
 
 def print_trainable_parameters(model):
     """
-    Prints the number of trainable parameters in the model.
+    Prints the number of trainable parameters in the model with detailed breakdown.
     """
     trainable_params = 0
     all_param = 0
     trainable_param_names = []
+
+    # Breakdown by category
+    lora_params = 0
+    merger_params = 0
+    llm_base_params = 0
+    vision_params = 0
+    other_params = 0
+
     for name, param in model.named_parameters():
         all_param += param.numel()
         if param.requires_grad:
             trainable_params += param.numel()
             trainable_param_names.append(name)
 
+            # Categorize
+            if "lora_" in name:
+                lora_params += param.numel()
+            elif "merger" in name:
+                merger_params += param.numel()
+            elif "language_model" in name or "lm_head" in name:
+                llm_base_params += param.numel()
+            elif "visual" in name:
+                vision_params += param.numel()
+            else:
+                other_params += param.numel()
+
+    rank0_print("=" * 50)
     rank0_print(
         f"trainable params: {trainable_params:,} || all params: {all_param:,} || trainable%: {100 * trainable_params / all_param:.2f}"
     )
-    if trainable_params == 0:
+
+    # Print breakdown
+    if trainable_params > 0:
+        rank0_print("\nTrainable parameters breakdown:")
+        rank0_print(f"  LoRA adapters: {lora_params:,} ({100 * lora_params / trainable_params:.1f}%)")
+        rank0_print(f"  Merger layers: {merger_params:,} ({100 * merger_params / trainable_params:.1f}%)")
+        rank0_print(f"  LLM base (non-LoRA): {llm_base_params:,} ({100 * llm_base_params / trainable_params:.1f}%)")
+        rank0_print(f"  Vision tower: {vision_params:,} ({100 * vision_params / trainable_params:.1f}%)")
+        if other_params > 0:
+            rank0_print(f"  Other: {other_params:,} ({100 * other_params / trainable_params:.1f}%)")
+        rank0_print(f"\nTrainable parameter names (first 10): {trainable_param_names[:10]}")
+    else:
         rank0_print("WARNING: No trainable parameters found!")
         rank0_print("This will result in learning_rate=0.0 and grad_norm=0.0")
-    else:
-        rank0_print(f"Trainable parameter names (first 10): {trainable_param_names[:10]}")
 
+    rank0_print("=" * 50)
     return trainable_params
 
 
@@ -257,6 +288,15 @@ def train():
             for name, param in model.named_parameters():
                 if "merger" in name:
                     param.requires_grad = True
+
+        # Re-unfreeze LLM if freeze_llm=False (for Phase 2 training)
+        if not training_args.freeze_llm:
+            rank0_print("Re-enabling LLM parameters for Phase 2 training...")
+            for name, param in model.named_parameters():
+                # Unfreeze base LLM parameters (not LoRA adapters)
+                if "language_model" in name or "lm_head" in name:
+                    if "lora_" not in name:  # Don't touch LoRA adapters
+                        param.requires_grad = True
 
         # Explicitly ensure LoRA parameters are trainable
         # This is critical - without this, LoRA parameters may not have requires_grad=True
