@@ -36,6 +36,8 @@ from io import BytesIO
 from typing import Dict, List, Tuple, Optional, Sequence
 from PIL import Image
 
+from mind2web_mapping import uitars_action_to_mind2web_op
+
 try:
     from openai import OpenAI
 except ImportError:
@@ -383,14 +385,6 @@ def compute_step_metrics(
         )
     )
 
-    ground_truth_actions = metadata.get("uitars_actions") or []
-    predicted_actions_raw = _split_action_strings(prediction_text or "")
-
-    if ground_truth_actions:
-        gt_norm = _normalize_action_sequence(ground_truth_actions)
-        pred_norm = _normalize_action_sequence(predicted_actions_raw)
-        metrics["action_str_em"] = 1.0 if pred_norm == gt_norm else 0.0
-
     image_w = image_h = None
     parsed_actions: List[Dict] = []
     predicted_point: Optional[Tuple[float, float]] = None
@@ -415,6 +409,20 @@ def compute_step_metrics(
             )
         except Exception:
             parsed_actions = []
+
+    ground_truth_op = metadata.get("op")
+    if ground_truth_op and parsed_actions:
+        first_action = parsed_actions[0]
+        parsed_action_type = first_action.get("action_type")
+        parsed_inputs = first_action.get("action_inputs", {})
+        
+        # Convert UITARS action type to Mind2Web op
+        predicted_op = uitars_action_to_mind2web_op(parsed_action_type, parsed_inputs)
+        
+        if predicted_op is not None:
+            gt_op_normalized = ground_truth_op.upper().strip()
+            pred_op_normalized = predicted_op.upper().strip()
+            metrics["action_str_em"] = 1.0 if gt_op_normalized == pred_op_normalized else 0.0
 
     for parsed in parsed_actions:
         candidate = _parse_start_point(parsed.get("action_inputs", {}), image_w, image_h)
