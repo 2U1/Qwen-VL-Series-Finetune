@@ -20,12 +20,18 @@ Set environment variables before running:
 import argparse
 import json
 import os
+import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
+
+from tqdm import tqdm
 
 from eval.episode_loader import load_episode
 from eval.uitars15_v1 import UITARSAgent, compute_step_metrics
+
+
+logger = logging.getLogger(__name__)
 
 
 STEP_METRIC_KEYS = ("action_str_em", "hit_box_accuracy", "bbox_center_mse")
@@ -100,6 +106,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to write per-step metrics as JSONL.",
     )
+    parser.add_argument(
+        "--summary_json",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to write per-episode summary metrics as a single JSON file. "
+            "Each entry contains episode id, number of steps, and averaged metrics."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -120,6 +135,13 @@ def _iter_episode_dirs(run_dir: Path):
 def main() -> None:
     args = parse_args()
 
+    # Configure basic logging if the root logger has no handlers yet.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        )
+
     runtime_conf = build_runtime_conf(args)
     agent = UITARSAgent(
         model=args.model,
@@ -127,6 +149,8 @@ def main() -> None:
         observation_type=args.observation_type,
         model_type="qwen25vl",
     )
+
+    episode_summaries: List[Dict[str, Any]] = []
 
     jsonl_file: Optional[Any] = None
     if args.output_jsonl is not None:
@@ -143,16 +167,21 @@ def main() -> None:
     def evaluate_one_episode(ep_dir: Path) -> None:
         nonlocal jsonl_file
         nonlocal metrics_file
+        nonlocal episode_summaries
+
+        logger.info("Evaluating episode '%s'", ep_dir.name)
         agent.reset()
 
         # Aggregators
-        steps = 0
         metric_totals = defaultdict(float)
         metric_counts = defaultdict(int)
 
-        step_index = 0
-        for instruction, obs, metadata in load_episode(
+        step_index = -1
+        step_iterator = load_episode(
             str(ep_dir), instruction_source=args.instruction_source
+        )
+        for step_index, (instruction, obs, metadata) in enumerate(
+            tqdm(step_iterator, desc=f"Steps [{ep_dir.name}]", unit="step")
         ):
             if args.reset_each_step:
                 agent.reset()
@@ -160,7 +189,12 @@ def main() -> None:
             try:
                 prediction, actions = agent.predict(instruction, obs)
             except Exception as e:
-                print(f"[runner] ERROR episode={ep_dir.name} step={step_index}: {e}")
+                logger.error(
+                    "Error during prediction: episode=%s step=%d error=%s",
+                    ep_dir.name,
+                    step_index,
+                    e,
+                )
                 if jsonl_file is not None:
                     record = {
                         "episode": ep_dir.name,
@@ -190,13 +224,21 @@ def main() -> None:
             if prediction == "client error" or actions in [["DONE"], ["FAIL"]]:
                 is_terminal = True
                 if prediction == "client error":
-                    print(f"[runner] WARNING: Client error at step={step_index}")
+                    logger.warning(
+                        "Client error at episode=%s step=%d", ep_dir.name, step_index
+                    )
                 elif actions == ["DONE"]:
-                    print(f"[runner] Task completed at step={step_index}")
+                    logger.info(
+                        "Task completed at episode=%s step=%d",
+                        ep_dir.name,
+                        step_index,
+                    )
                 elif actions == ["FAIL"]:
-                    print(f"[runner] Task failed at step={step_index}")
-            print(f"[runner] episode={ep_dir.name} step={step_index}")
-            print(f"[runner] instruction={instruction}")
+                    logger.info(
+                        "Task failed at episode=%s step=%d",
+                        ep_dir.name,
+                        step_index,
+                    )
             metric_parts = []
             for key in STEP_METRIC_KEYS:
                 value = metrics.get(key)
@@ -204,9 +246,12 @@ def main() -> None:
                     metric_parts.append(f"{key}=NA")
                 else:
                     metric_parts.append(f"{key}={value:.3f}")
-            print(f"[runner] prediction={prediction}")
-            print(f"[runner] actions={actions}")
-            print(f"[runner] metrics {' '.join(metric_parts)}")
+            logger.info(
+                "episode=%s step=%d metrics=%s",
+                ep_dir.name,
+                step_index,
+                " ".join(metric_parts),
+            )
             if jsonl_file is not None:
                 record = {
                     "episode": ep_dir.name,
@@ -229,17 +274,19 @@ def main() -> None:
                 metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
                 metrics_file.flush()
 
-            steps += 1
             for key, value in metrics.items():
                 if value is None:
                     continue
                 metric_totals[key] += float(value)
                 metric_counts[key] += 1
-            step_index += 1
             if is_terminal:
-                print(f"[runner] Stopping evaluation due to terminal state.")
+                logger.info(
+                    "Stopping evaluation for episode=%s due to terminal state.",
+                    ep_dir.name,
+                )
                 break
 
+        num_steps = step_index + 1 if step_index >= 0 else 0
         summary_parts = []
         for key in STEP_METRIC_KEYS:
             count = metric_counts.get(key, 0)
@@ -248,10 +295,27 @@ def main() -> None:
             else:
                 avg = metric_totals[key] / count
                 summary_parts.append(f"{key}={avg:.3f} (n={count})")
-        print(
-            f"[runner] Completed {step_index} steps for episode={ep_dir.name}. "
-            + " ".join(summary_parts)
+        logger.info(
+            "Completed %d steps for episode=%s. %s",
+            num_steps,
+            ep_dir.name,
+            " ".join(summary_parts),
         )
+
+        # Record a compact JSON-serializable summary for this episode.
+        episode_summary: Dict[str, Any] = {
+            "episode": ep_dir.name,
+            "num_steps": num_steps,
+            "metrics": {},
+        }
+        for key in STEP_METRIC_KEYS:
+            count = metric_counts.get(key, 0)
+            if count == 0:
+                episode_summary["metrics"][key] = {"mean": None, "count": 0}
+            else:
+                avg = metric_totals[key] / count
+                episode_summary["metrics"][key] = {"mean": avg, "count": count}
+        episode_summaries.append(episode_summary)
 
     if args.episode_dir:
         episode_dir = Path(args.episode_dir)
@@ -260,13 +324,23 @@ def main() -> None:
         evaluate_one_episode(episode_dir)
     else:
         run_dir = Path(args.run_dir)
-        for ep in _iter_episode_dirs(run_dir):
+        episode_dirs = list(_iter_episode_dirs(run_dir))
+        logger.info("Found %d episode(s) under run_dir=%s", len(episode_dirs), run_dir)
+        for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
             evaluate_one_episode(ep)
     
     if jsonl_file is not None:
         jsonl_file.close()
     if metrics_file is not None:
         metrics_file.close()
+
+    # Optionally write per-episode summary metrics to a compact JSON file.
+    if args.summary_json is not None:
+        summary_path = Path(args.summary_json)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("w") as f:
+            json.dump(episode_summaries, f, ensure_ascii=False, indent=2)
+        logger.info("Wrote summary metrics to %s", summary_path)
 
 
 if __name__ == "__main__":

@@ -50,7 +50,6 @@ IMAGE_FACTOR = 28
 MIN_PIXELS = 100 * 28 * 28
 MAX_PIXELS = 16384 * 28 * 28
 MAX_RATIO = 200
-HIT_TOLERANCE_PX = 20.0
 
 UITARS_ACTION_SPACE = """
 click(start_box='<|box_start|>(x1,y1)<|box_end|>')
@@ -431,16 +430,10 @@ def compute_step_metrics(
         except (TypeError, ValueError):
             target_point = None
 
-    if predicted_point is not None:
-        if bbox:
-            metrics["hit_box_accuracy"] = 1.0 if _point_inside_bbox(predicted_point, bbox) else 0.0
-        elif len(coords) >= 2:
-            try:
-                cx, cy = float(coords[0]), float(coords[1])
-                within = abs(predicted_point[0] - cx) <= HIT_TOLERANCE_PX and abs(predicted_point[1] - cy) <= HIT_TOLERANCE_PX
-                metrics["hit_box_accuracy"] = 1.0 if within else 0.0
-            except (TypeError, ValueError):
-                metrics["hit_box_accuracy"] = None
+    if predicted_point is not None and bbox:
+        metrics["hit_box_accuracy"] = (
+            1.0 if _point_inside_bbox(predicted_point, bbox) else 0.0
+        )
 
     if predicted_point is not None and target_point is not None:
         metrics["bbox_center_mse"] = _mse_distance(predicted_point, target_point)
