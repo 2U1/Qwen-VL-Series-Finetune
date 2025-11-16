@@ -32,8 +32,9 @@ import re
 import argparse
 import json
 from collections import OrderedDict
+from collections import deque
 from io import BytesIO
-from typing import Dict, List, Tuple, Optional, Sequence
+from typing import Dict, List, Tuple, Optional, Sequence, Any, Deque
 from PIL import Image
 
 try:
@@ -258,7 +259,7 @@ def parse_action_to_structure_output(text, factor, origin_resized_height, origin
 
 
 # ============================================================================
-# Evaluation Helpers
+# Evaluation Helpers and Agent Wrapper
 # ============================================================================
 
 def _split_action_strings(prediction_text: str) -> List[str]:
@@ -354,6 +355,148 @@ def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
 
 def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:
     return [action.strip() for action in actions if action and action.strip()]
+
+
+class UITARSAgent:
+    """
+    Lightweight UITARS agent wrapper that adapts episode loader output to the vLLM-style API.
+
+    This class focuses on:
+      - Building the prompt using UITARS templates from this module.
+      - Converting screenshot bytes to base64-encoded images.
+      - Maintaining a simple sliding window of past screenshots (history_n).
+      - Calling an OpenAI-compatible client and returning (prediction_text, actions).
+
+    It intentionally reuses the helper functions and prompt constants defined above,
+    rather than re-implementing the original OSWorld UITARSAgent in full.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        runtime_conf: Dict[str, Any],
+        observation_type: str = "screenshot",
+        model_type: str = "qwen25vl",
+    ) -> None:
+        self.model = model
+        self.runtime_conf = dict(runtime_conf)
+        self.observation_type = observation_type
+        self.model_type = model_type
+
+        # Core generation/config parameters
+        self.temperature: float = float(self.runtime_conf.get("temperature", 0.0))
+        self.top_p: float = float(self.runtime_conf.get("top_p", 0.9))
+        self.max_tokens: int = int(self.runtime_conf.get("max_tokens", 512))
+        self.language: str = str(self.runtime_conf.get("language", "English"))
+
+        # Image constraints
+        self.max_pixels: int = int(self.runtime_conf.get("max_pixels", MAX_PIXELS))
+        self.min_pixels: int = int(self.runtime_conf.get("min_pixels", MIN_PIXELS))
+
+        # History control: how many past screenshots to send, including current.
+        self.history_n: int = int(self.runtime_conf.get("history_n", 5))
+        if self.history_n < 1:
+            self.history_n = 1
+
+        # Sliding window of screenshot bytes (oldest first).
+        self._screenshot_history: Deque[bytes] = deque(maxlen=self.history_n)
+
+    def reset(self) -> None:
+        """Clear internal history so the next step is stateless."""
+        self._screenshot_history.clear()
+
+    def _build_messages(self, instruction: str) -> List[Dict[str, Any]]:
+        """
+        Build OpenAI-compatible messages with the current history of screenshots.
+
+        The user message contains:
+          - A single text entry with the UITARS prompt (including action space).
+          - One image entry per screenshot in the history, oldest to newest.
+        """
+        # Format textual prompt with action space and instruction.
+        prompt = UITARS_USR_PROMPT_THOUGHT.format(
+            action_space=UITARS_ACTION_SPACE,
+            language=self.language,
+            instruction=instruction,
+        )
+
+        user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+
+        # Attach each screenshot in history as an image_url.
+        for screenshot_bytes in self._screenshot_history:
+            try:
+                image = Image.open(BytesIO(screenshot_bytes))
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+            except Exception:
+                # If a particular frame cannot be decoded, skip it.
+                continue
+
+            encoded = pil_to_base64(image)
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+            )
+
+        messages: List[Dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+        return messages
+
+    def predict(self, instruction: str, obs: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """
+        Run one prediction step for a given instruction and observation.
+
+        Args:
+            instruction: Text instruction for this step.
+            obs: Observation dict from episode_loader, expected to contain:
+                - "screenshot": bytes
+                - "accessibility_tree": currently unused
+
+        Returns:
+            prediction_text: Raw model text response.
+            actions: List of raw UITARS action strings parsed from the response.
+        """
+        screenshot_bytes = obs.get("screenshot")
+        if not isinstance(screenshot_bytes, (bytes, bytearray)):
+            raise ValueError("obs['screenshot'] must be bytes.")
+
+        # Update sliding window with the current frame.
+        self._screenshot_history.append(bytes(screenshot_bytes))
+
+        messages = self._build_messages(instruction)
+
+        # Resolve API endpoint and key, preferring DOUBAO_* but falling back to VLLM_*.
+        api_url = os.environ.get("DOUBAO_API_URL") or os.environ.get(
+            "VLLM_API_URL", "http://localhost:8000/v1"
+        )
+        api_key = os.environ.get("DOUBAO_API_KEY") or os.environ.get(
+            "VLLM_API_KEY", "EMPTY"
+        )
+
+        client = OpenAI(base_url=api_url, api_key=api_key)
+
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
+        )
+        prediction_text = response.choices[0].message.content.strip()
+
+        # Extract raw UITARS action strings from the response.
+        actions = _split_action_strings(prediction_text)
+        return prediction_text, actions
 
 
 def compute_step_metrics(
