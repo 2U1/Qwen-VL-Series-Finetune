@@ -37,7 +37,7 @@ from io import BytesIO
 from typing import Dict, List, Tuple, Optional, Sequence, Any, Deque
 from PIL import Image
 
-from mind2web_mapping import uitars_action_to_mind2web_op
+from eval.mind2web_mapping import uitars_action_to_mind2web_op
 
 try:
     from openai import OpenAI
