@@ -4,14 +4,17 @@ Run UITARSAgent evaluation on recorded trajectory episodes.
 Usage (single episode):
     python -m eval.uitars15_runner \\
         --episode_dir /abs/path/to/outputs/run_X/<episode_id> \\
-        --model your-model \\
-        --output_jsonl /abs/path/to/results.jsonl
+        --model your-model
 
 Usage (entire run directory of episodes):
     python -m eval.uitars15_runner \\
         --run_dir /abs/path/to/outputs/run_X \\
-        --model your-model \\
-        --output_jsonl /abs/path/to/results.jsonl
+        --model your-model
+
+By default, per-step LLM predictions are written to
+`<run_dir>/uitars_predictions/<episode_id>.jsonl`. You can also optionally
+provide `--output_jsonl` to collect all steps into a single aggregated JSONL
+file at an arbitrary path.
 
 Set environment variables before running:
     export DOUBAO_API_URL="https://your-endpoint.com/v1"
@@ -135,6 +138,18 @@ def _iter_episode_dirs(run_dir: Path):
 def main() -> None:
     args = parse_args()
 
+    # Derive a base directory for default output locations.
+    if args.run_dir:
+        _base_dir = Path(args.run_dir)
+    else:
+        _base_dir = Path(args.episode_dir).parent
+
+    # Enable default aggregated outputs if not explicitly provided.
+    if args.metrics_jsonl is None:
+        args.metrics_jsonl = str(_base_dir / "uitars_metrics.jsonl")
+    if args.summary_json is None:
+        args.summary_json = str(_base_dir / "uitars_summary.json")
+
     # Configure basic logging if the root logger has no handlers yet.
     if not logging.getLogger().handlers:
         logging.basicConfig(
@@ -164,6 +179,14 @@ def main() -> None:
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
         metrics_file = metrics_path.open("w")
 
+    # Default directory to store per-episode LLM predictions.
+    if args.run_dir:
+        predictions_root = Path(args.run_dir) / "uitars_predictions"
+    else:
+        episode_dir_for_output = Path(args.episode_dir)
+        predictions_root = episode_dir_for_output.parent / "uitars_predictions"
+    predictions_root.mkdir(parents=True, exist_ok=True)
+
     def evaluate_one_episode(ep_dir: Path) -> None:
         nonlocal jsonl_file
         nonlocal metrics_file
@@ -176,115 +199,130 @@ def main() -> None:
         metric_totals = defaultdict(float)
         metric_counts = defaultdict(int)
 
-        step_index = -1
-        step_iterator = load_episode(
-            str(ep_dir), instruction_source=args.instruction_source
-        )
-        for step_index, (instruction, obs, metadata) in enumerate(
-            tqdm(step_iterator, desc=f"Steps [{ep_dir.name}]", unit="step")
-        ):
-            if args.reset_each_step:
-                agent.reset()
+        episode_pred_path = predictions_root / f"{ep_dir.name}.jsonl"
+        episode_pred_file: Optional[Any] = episode_pred_path.open("w", encoding="utf-8")
 
-            try:
-                prediction, actions = agent.predict(instruction, obs)
-            except Exception as e:
-                logger.error(
-                    "Error during prediction: episode=%s step=%d error=%s",
-                    ep_dir.name,
-                    step_index,
-                    e,
-                )
-                if jsonl_file is not None:
+        try:
+            step_index = -1
+            step_iterator = load_episode(
+                str(ep_dir), instruction_source=args.instruction_source
+            )
+            for step_index, (instruction, obs, metadata) in enumerate(
+                tqdm(step_iterator, desc=f"Steps [{ep_dir.name}]", unit="step")
+            ):
+                if args.reset_each_step:
+                    agent.reset()
+
+                try:
+                    prediction, actions = agent.predict(instruction, obs)
+                except Exception as e:
+                    logger.error(
+                        "Error during prediction: episode=%s step=%d error=%s",
+                        ep_dir.name,
+                        step_index,
+                        e,
+                    )
                     record = {
                         "episode": ep_dir.name,
                         "step_index": step_index,
                         "instruction": instruction,
+                        "action_uid": metadata.get("action_uid"),
                         "error": str(e),
                         "metadata": metadata,
                     }
-                    jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    jsonl_file.flush()
-                raise
-            
-            # Compute metrics per step
-            try:
-                metrics = compute_step_metrics(
-                    prediction_text=prediction,
-                    screenshot_bytes=obs["screenshot"],
-                    metadata=metadata,
-                    model_type="qwen25vl",
-                    max_pixels=args.max_pixels,
-                    min_pixels=args.min_pixels
-                )
-            except Exception as _:
-                metrics = {key: None for key in STEP_METRIC_KEYS}
+                    if jsonl_file is not None:
+                        jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        jsonl_file.flush()
+                    episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    episode_pred_file.flush()
+                    raise
+                
+                # Compute metrics per step
+                try:
+                    metrics = compute_step_metrics(
+                        prediction_text=prediction,
+                        screenshot_bytes=obs["screenshot"],
+                        metadata=metadata,
+                        model_type="qwen25vl",
+                        max_pixels=args.max_pixels,
+                        min_pixels=args.min_pixels
+                    )
+                except Exception as _:
+                    metrics = {key: None for key in STEP_METRIC_KEYS}
 
-            is_terminal = False
-            if prediction == "client error" or actions in [["DONE"], ["FAIL"]]:
-                is_terminal = True
-                if prediction == "client error":
-                    logger.warning(
-                        "Client error at episode=%s step=%d", ep_dir.name, step_index
-                    )
-                elif actions == ["DONE"]:
-                    logger.info(
-                        "Task completed at episode=%s step=%d",
-                        ep_dir.name,
-                        step_index,
-                    )
-                elif actions == ["FAIL"]:
-                    logger.info(
-                        "Task failed at episode=%s step=%d",
-                        ep_dir.name,
-                        step_index,
-                    )
-            metric_parts = []
-            for key in STEP_METRIC_KEYS:
-                value = metrics.get(key)
-                if value is None:
-                    metric_parts.append(f"{key}=NA")
-                else:
-                    metric_parts.append(f"{key}={value:.3f}")
-            logger.info(
-                "episode=%s step=%d metrics=%s",
-                ep_dir.name,
-                step_index,
-                " ".join(metric_parts),
-            )
-            if jsonl_file is not None:
+                is_terminal = False
+                if prediction == "client error" or actions in [["DONE"], ["FAIL"]]:
+                    is_terminal = True
+                    if prediction == "client error":
+                        logger.warning(
+                            "Client error at episode=%s step=%d", ep_dir.name, step_index
+                        )
+                    elif actions == ["DONE"]:
+                        logger.info(
+                            "Task completed at episode=%s step=%d",
+                            ep_dir.name,
+                            step_index,
+                        )
+                    elif actions == ["FAIL"]:
+                        logger.info(
+                            "Task failed at episode=%s step=%d",
+                            ep_dir.name,
+                            step_index,
+                        )
+                metric_parts = []
+                for key in STEP_METRIC_KEYS:
+                    value = metrics.get(key)
+                    if value is None:
+                        metric_parts.append(f"{key}=NA")
+                    else:
+                        metric_parts.append(f"{key}={value:.3f}")
+                logger.info(
+                    "episode=%s step=%d metrics=%s",
+                    ep_dir.name,
+                    step_index,
+                    " ".join(metric_parts),
+                )
+
                 record = {
                     "episode": ep_dir.name,
                     "step_index": step_index,
                     "instruction": instruction,
+                    "action_uid": metadata.get("action_uid"),
                     "prediction": prediction,
                     "actions": actions,
                     "metadata": metadata,
                 }
-                jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                jsonl_file.flush()
-            if metrics_file is not None:
-                mrec = {
-                    "episode": ep_dir.name,
-                    "step_index": step_index,
-                    "op": metadata.get("op"),
-                    "ground_truth_actions": metadata.get("uitars_actions", []),
-                    "metrics": metrics,
-                }
-                metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
-                metrics_file.flush()
+                if jsonl_file is not None:
+                    jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    jsonl_file.flush()
+                episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                episode_pred_file.flush()
 
-            for key, value in metrics.items():
-                if value is None:
-                    continue
-                metric_totals[key] += float(value)
-                metric_counts[key] += 1
-            if is_terminal:
-                logger.info(
-                    "Stopping evaluation for episode=%s due to terminal state.",
-                    ep_dir.name,
-                )
-                break
+                if metrics_file is not None:
+                    mrec = {
+                        "episode": ep_dir.name,
+                        "step_index": step_index,
+                        "action_uid": metadata.get("action_uid"),
+                        "op": metadata.get("op"),
+                        "ground_truth_actions": metadata.get("uitars_actions", []),
+                        "metrics": metrics,
+                    }
+                    metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
+                    metrics_file.flush()
+
+                for key, value in metrics.items():
+                    if value is None:
+                        continue
+                    metric_totals[key] += float(value)
+                    metric_counts[key] += 1
+                if is_terminal:
+                    logger.info(
+                        "Stopping evaluation for episode=%s due to terminal state.",
+                        ep_dir.name,
+                    )
+                    break
+        finally:
+            episode_pred_file.close()
 
         num_steps = step_index + 1 if step_index >= 0 else 0
         summary_parts = []
