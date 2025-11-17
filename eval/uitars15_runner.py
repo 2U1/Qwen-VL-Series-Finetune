@@ -349,7 +349,10 @@ def main() -> None:
                     metric_counts[key] += 1
                     global_metric_totals[key] += float(value)
                     global_metric_counts[key] += 1
-                    global_num_steps += 1
+
+                # Count every processed step once for global statistics,
+                # regardless of how many metrics are defined for it.
+                global_num_steps += 1
                 if is_terminal:
                     logger.info(
                         "Stopping evaluation for episode=%s due to terminal state.",
