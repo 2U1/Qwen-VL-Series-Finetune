@@ -12,9 +12,9 @@ Usage (entire run directory of episodes):
         --model your-model
 
 By default, per-step LLM predictions are written to
-`<run_dir>/uitars_predictions/<episode_id>.jsonl`. You can also optionally
-provide `--output_jsonl` to collect all steps into a single aggregated JSONL
-file at an arbitrary path.
+`./uitars_predictions/<episode_id>.jsonl` in the current working directory.
+You can also optionally provide `--output_jsonl` to collect all steps into a
+single aggregated JSONL file at an arbitrary path.
 
 Set environment variables before running:
     export DOUBAO_API_URL="https://your-endpoint.com/v1"
@@ -147,17 +147,15 @@ def _iter_episode_dirs(run_dir: Path):
 def main() -> None:
     args = parse_args()
 
-    # Derive a base directory for default output locations.
-    if args.run_dir:
-        _base_dir = Path(args.run_dir)
-    else:
-        _base_dir = Path(args.episode_dir).parent
+    # Default output locations live in the current working directory unless
+    # explicitly overridden by CLI flags.
+    cwd = Path.cwd()
 
     # Enable default aggregated outputs if not explicitly provided.
     if args.metrics_jsonl is None:
-        args.metrics_jsonl = str(_base_dir / "uitars_metrics.jsonl")
+        args.metrics_jsonl = str(cwd / "uitars_metrics.jsonl")
     if args.summary_json is None:
-        args.summary_json = str(_base_dir / "uitars_summary.json")
+        args.summary_json = str(cwd / "uitars_summary.json")
 
     # Configure basic logging if the root logger has no handlers yet.
     if not logging.getLogger().handlers:
@@ -189,11 +187,10 @@ def main() -> None:
         metrics_file = metrics_path.open("w")
 
     # Default directory to store per-episode LLM predictions.
-    if args.run_dir:
-        predictions_root = Path(args.run_dir) / "uitars_predictions"
-    else:
-        episode_dir_for_output = Path(args.episode_dir)
-        predictions_root = episode_dir_for_output.parent / "uitars_predictions"
+    # This is rooted in the current working directory by default so that
+    # running the script from any location keeps all artifacts together,
+    # unless the caller explicitly redirects paths via CLI flags.
+    predictions_root = cwd / "uitars_predictions"
     predictions_root.mkdir(parents=True, exist_ok=True)
 
     def evaluate_one_episode(ep_dir: Path) -> None:
