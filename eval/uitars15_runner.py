@@ -65,6 +65,15 @@ def parse_args() -> argparse.Namespace:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--episode_dir", type=str, help="Path to outputs/<run>/<episode> directory.")
     input_group.add_argument("--run_dir", type=str, help="Path to a run directory containing episode subdirectories.")
+    parser.add_argument(
+        "--max_episodes",
+        type=int,
+        default=None,
+        help=(
+            "If set together with --run_dir, evaluate at most this many episodes "
+            "from the sorted list of available episodes."
+        ),
+    )
     parser.add_argument("--model", type=str, required=True, help="Model name/id for the OpenAI-compatible endpoint.")
     parser.add_argument("--instruction_source", type=str, choices=["step", "global"], default="step")
     parser.add_argument(
@@ -364,6 +373,16 @@ def main() -> None:
         run_dir = Path(args.run_dir)
         episode_dirs = list(_iter_episode_dirs(run_dir))
         logger.info("Found %d episode(s) under run_dir=%s", len(episode_dirs), run_dir)
+
+        # Optionally limit the number of episodes evaluated.
+        if args.max_episodes is not None:
+            if args.max_episodes < 0:
+                raise ValueError("--max_episodes must be non-negative if provided.")
+            episode_dirs = episode_dirs[: args.max_episodes]
+            logger.info(
+                "Restricting evaluation to first %d episode(s) after sorting.",
+                len(episode_dirs),
+            )
         for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
             evaluate_one_episode(ep)
     
