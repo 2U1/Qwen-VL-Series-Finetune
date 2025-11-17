@@ -167,4 +167,57 @@ def mind2web_step_to_uitars(step: Dict) -> List[str]:
     return actions
 
 
+def uitars_action_to_mind2web_op(action_type: str, action_inputs: Dict[str, str]) -> Optional[str]:
+    """
+    Map UITARS action_type to Mind2Web 'op' string.
+    
+    Args:
+        action_type: UITARS action name (e.g., 'click', 'type', 'scroll')
+        action_inputs: Dictionary of action parameters (e.g., {'content': 'hello'})
+    
+    Returns:
+        Mind2Web operation code (e.g., 'CLICK', 'TYPE', 'SCROLL')
+    
+    Examples:
+        >>> uitars_action_to_mind2web_op('click', {})
+        'CLICK'
+        >>> uitars_action_to_mind2web_op('type', {'content': '\\n'})
+        'PRESS ENTER'
+        >>> uitars_action_to_mind2web_op('hotkey', {'key': 'enter'})
+        'HOTKEY'
+    """
+    action_type = (action_type or "").lower().strip()
+    
+    # Direct mappings
+    ACTION_TYPE_TO_OP = {
+        "click": "CLICK",
+        "left_double": "CLICK",  # Mind2Web doesn't distinguish double-click, map to CLICK
+        "right_single": "CLICK",  # Mind2Web doesn't have right-click, map to CLICK
+        "drag": "DRAG",
+        "scroll": "SCROLL",
+        "wait": "IGNORE",
+        "finished": "IGNORE",  # No direct Mind2Web equivalent
+    }
+    
+    # Check for direct mapping
+    if action_type in ACTION_TYPE_TO_OP:
+        return ACTION_TYPE_TO_OP[action_type]
+    
+    # Special handling for type action
+    if action_type == "type":
+        content = action_inputs.get("content", "")
+        # Check if it's a submit action (ends with newline)
+        if content and content.strip() == "\\n":
+            return "ENTER"
+        return "TYPE"
+    
+    # Special handling for hotkey
+    if action_type == "hotkey":
+        key = action_inputs.get("key", "").lower()
+        # Map common hotkeys to specific Mind2Web ops
+        if key in ("enter", "return", "\\n"):
+            return "ENTER"
+        return "HOTKEY"
+    
+    return None
 
