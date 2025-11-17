@@ -12,9 +12,10 @@ Usage (entire run directory of episodes):
         --model your-model
 
 By default, per-step LLM predictions are written to
-`./uitars_predictions/<episode_id>.jsonl` in the current working directory.
-You can also optionally provide `--output_jsonl` to collect all steps into a
-single aggregated JSONL file at an arbitrary path.
+`./uitars_eval_<timestamp>/uitars_predictions/<episode_id>.jsonl` in the
+current working directory. Metrics and summary files are similarly written to
+that timestamped directory. You can also optionally provide `--output_jsonl`
+to collect all steps into a single aggregated JSONL file at an arbitrary path.
 
 Set environment variables before running:
     export DOUBAO_API_URL="https://your-endpoint.com/v1"
@@ -24,6 +25,7 @@ import argparse
 import json
 import os
 import logging
+from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -65,6 +67,15 @@ def parse_args() -> argparse.Namespace:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--episode_dir", type=str, help="Path to outputs/<run>/<episode> directory.")
     input_group.add_argument("--run_dir", type=str, help="Path to a run directory containing episode subdirectories.")
+    parser.add_argument(
+        "--output_root",
+        type=str,
+        default=None,
+        help=(
+            "Root directory for metrics, predictions, and summary. "
+            "Defaults to ./uitars_eval_<timestamp> under the current working directory."
+        ),
+    )
     parser.add_argument(
         "--max_episodes",
         type=int,
@@ -147,15 +158,21 @@ def _iter_episode_dirs(run_dir: Path):
 def main() -> None:
     args = parse_args()
 
-    # Default output locations live in the current working directory unless
-    # explicitly overridden by CLI flags.
+    # Default output locations live under a timestamped directory in the
+    # current working directory unless explicitly overridden by CLI flags.
     cwd = Path.cwd()
+    if args.output_root is not None:
+        output_root = Path(args.output_root)
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_root = cwd / f"uitars_eval_{timestamp}"
+    output_root.mkdir(parents=True, exist_ok=True)
 
     # Enable default aggregated outputs if not explicitly provided.
     if args.metrics_jsonl is None:
-        args.metrics_jsonl = str(cwd / "uitars_metrics.jsonl")
+        args.metrics_jsonl = str(output_root / "uitars_metrics.jsonl")
     if args.summary_json is None:
-        args.summary_json = str(cwd / "uitars_summary.json")
+        args.summary_json = str(output_root / "uitars_summary.json")
 
     # Configure basic logging if the root logger has no handlers yet.
     if not logging.getLogger().handlers:
@@ -187,10 +204,10 @@ def main() -> None:
         metrics_file = metrics_path.open("w")
 
     # Default directory to store per-episode LLM predictions.
-    # This is rooted in the current working directory by default so that
-    # running the script from any location keeps all artifacts together,
-    # unless the caller explicitly redirects paths via CLI flags.
-    predictions_root = cwd / "uitars_predictions"
+    # This is rooted in the output_root directory by default so that
+    # running the script from any location keeps all artifacts for a run
+    # grouped together, unless paths are explicitly redirected via CLI flags.
+    predictions_root = output_root / "uitars_predictions"
     predictions_root.mkdir(parents=True, exist_ok=True)
 
     def evaluate_one_episode(ep_dir: Path) -> None:
