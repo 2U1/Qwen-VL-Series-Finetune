@@ -31,9 +31,13 @@ import math
 import re
 import argparse
 import json
+from collections import OrderedDict
+from collections import deque
 from io import BytesIO
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Sequence, Any, Deque
 from PIL import Image
+
+from mind2web_mapping import uitars_action_to_mind2web_op
 
 try:
     from openai import OpenAI
@@ -254,6 +258,338 @@ def parse_action_to_structure_output(text, factor, origin_resized_height, origin
             "text": text
         })
     return actions
+
+
+# ============================================================================
+# Evaluation Helpers and Agent Wrapper
+# ============================================================================
+
+def _split_action_strings(prediction_text: str) -> List[str]:
+    """
+    Extract raw action strings from a model response while preserving formatting.
+    """
+    if not prediction_text or "Action:" not in prediction_text:
+        return []
+
+    tail = prediction_text.split("Action:", 1)[1]
+    lines = tail.replace("\r", "").splitlines()
+    terminators = ("Thought:", "Reflection:", "Summary:", "Observation:", "Call_user", "Call User")
+    buffer: List[str] = []
+    current: List[str] = []
+
+    def flush():
+        nonlocal current
+        if current:
+            joined = " ".join(segment.strip() for segment in current if segment.strip())
+            if joined:
+                buffer.append(joined)
+        current = []
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            flush()
+            continue
+        if any(stripped.startswith(term) for term in terminators):
+            flush()
+            break
+        current.append(stripped)
+    flush()
+    return buffer
+
+
+def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_h: Optional[int]) -> Optional[Tuple[float, float]]:
+    """
+    Convert the first available start_box/end_box entry into absolute pixel coordinates.
+    """
+    candidate = None
+    for key in ("start_box", "end_box"):
+        if key in action_inputs:
+            candidate = action_inputs[key]
+            break
+    if candidate is None:
+        return None
+    try:
+        if isinstance(candidate, str):
+            coords = ast.literal_eval(candidate)
+        else:
+            coords = candidate
+        if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+            return None
+        x_raw = float(coords[0])
+        y_raw = float(coords[1])
+        if img_w and 0.0 <= x_raw <= 1.0:
+            x = x_raw * img_w
+        else:
+            x = x_raw
+        if img_h and 0.0 <= y_raw <= 1.0:
+            y = y_raw * img_h
+        else:
+            y = y_raw
+        return x, y
+    except Exception:
+        return None
+
+
+def _point_inside_bbox(point: Tuple[float, float], bbox: Sequence[float]) -> bool:
+    x, y = point
+    if len(bbox) < 4:
+        return False
+    bx, by, bw, bh = map(float, bbox[:4])
+    return bx <= x <= bx + bw and by <= y <= by + bh
+
+
+def _center_from_bbox(bbox: Sequence[float]) -> Optional[Tuple[float, float]]:
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x, y, w, h = map(float, bbox[:4])
+        return x + w / 2.0, y + h / 2.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+    dx = p1[0] - p2[0]
+    dy = p1[1] - p2[1]
+    return (dx * dx + dy * dy) / 2.0
+
+
+def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:
+    return [action.strip() for action in actions if action and action.strip()]
+
+
+class UITARSAgent:
+    """
+    Lightweight UITARS agent wrapper that adapts episode loader output to the vLLM-style API.
+
+    This class focuses on:
+      - Building the prompt using UITARS templates from this module.
+      - Converting screenshot bytes to base64-encoded images.
+      - Maintaining a simple sliding window of past screenshots (history_n).
+      - Calling an OpenAI-compatible client and returning (prediction_text, actions).
+
+    It intentionally reuses the helper functions and prompt constants defined above,
+    rather than re-implementing the original OSWorld UITARSAgent in full.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        runtime_conf: Dict[str, Any],
+        observation_type: str = "screenshot",
+        model_type: str = "qwen25vl",
+    ) -> None:
+        self.model = model
+        self.runtime_conf = dict(runtime_conf)
+        self.observation_type = observation_type
+        self.model_type = model_type
+
+        # Core generation/config parameters
+        self.temperature: float = float(self.runtime_conf.get("temperature", 0.0))
+        self.top_p: float = float(self.runtime_conf.get("top_p", 0.9))
+        self.max_tokens: int = int(self.runtime_conf.get("max_tokens", 512))
+        self.language: str = str(self.runtime_conf.get("language", "English"))
+
+        # Image constraints
+        self.max_pixels: int = int(self.runtime_conf.get("max_pixels", MAX_PIXELS))
+        self.min_pixels: int = int(self.runtime_conf.get("min_pixels", MIN_PIXELS))
+
+        # History control: how many past screenshots to send, including current.
+        self.history_n: int = int(self.runtime_conf.get("history_n", 5))
+        if self.history_n < 1:
+            self.history_n = 1
+
+        # Sliding window of screenshot bytes (oldest first).
+        self._screenshot_history: Deque[bytes] = deque(maxlen=self.history_n)
+
+    def reset(self) -> None:
+        """Clear internal history so the next step is stateless."""
+        self._screenshot_history.clear()
+
+    def _build_messages(self, instruction: str) -> List[Dict[str, Any]]:
+        """
+        Build OpenAI-compatible messages with the current history of screenshots.
+
+        The user message contains:
+          - A single text entry with the UITARS prompt (including action space).
+          - One image entry per screenshot in the history, oldest to newest.
+        """
+        # Format textual prompt with action space and instruction.
+        prompt = UITARS_USR_PROMPT_THOUGHT.format(
+            action_space=UITARS_ACTION_SPACE,
+            language=self.language,
+            instruction=instruction,
+        )
+
+        user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+
+        # Attach each screenshot in history as an image_url.
+        for screenshot_bytes in self._screenshot_history:
+            try:
+                image = Image.open(BytesIO(screenshot_bytes))
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+            except Exception:
+                # If a particular frame cannot be decoded, skip it.
+                continue
+
+            encoded = pil_to_base64(image)
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+            )
+
+        messages: List[Dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+        return messages
+
+    def predict(self, instruction: str, obs: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """
+        Run one prediction step for a given instruction and observation.
+
+        Args:
+            instruction: Text instruction for this step.
+            obs: Observation dict from episode_loader, expected to contain:
+                - "screenshot": bytes
+                - "accessibility_tree": currently unused
+
+        Returns:
+            prediction_text: Raw model text response.
+            actions: List of raw UITARS action strings parsed from the response.
+        """
+        screenshot_bytes = obs.get("screenshot")
+        if not isinstance(screenshot_bytes, (bytes, bytearray)):
+            raise ValueError("obs['screenshot'] must be bytes.")
+
+        # Update sliding window with the current frame.
+        self._screenshot_history.append(bytes(screenshot_bytes))
+
+        messages = self._build_messages(instruction)
+
+        # Resolve API endpoint and key, preferring DOUBAO_* but falling back to VLLM_*.
+        api_url = os.environ.get("DOUBAO_API_URL") or os.environ.get(
+            "VLLM_API_URL", "http://localhost:8000/v1"
+        )
+        api_key = os.environ.get("DOUBAO_API_KEY") or os.environ.get(
+            "VLLM_API_KEY", "EMPTY"
+        )
+
+        client = OpenAI(base_url=api_url, api_key=api_key)
+
+        response = client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
+        )
+        prediction_text = response.choices[0].message.content.strip()
+
+        # Extract raw UITARS action strings from the response.
+        actions = _split_action_strings(prediction_text)
+        return prediction_text, actions
+
+
+def compute_step_metrics(
+    prediction_text: str,
+    screenshot_bytes: bytes,
+    metadata: Dict,
+    model_type: str = "qwen25vl",
+    max_pixels: int = MAX_PIXELS,
+    min_pixels: int = MIN_PIXELS,
+) -> Dict[str, Optional[float]]:
+    """
+    Compute per-step evaluation metrics.
+
+    Returns:
+        {
+            "action_str_em": Optional[float],
+            "hit_box_accuracy": Optional[float],
+            "bbox_center_mse": Optional[float],
+        }
+    """
+    metrics: Dict[str, Optional[float]] = OrderedDict(
+        (
+            ("action_str_em", None),
+            ("hit_box_accuracy", None),
+            ("bbox_center_mse", None),
+        )
+    )
+
+    image_w = image_h = None
+    parsed_actions: List[Dict] = []
+    predicted_point: Optional[Tuple[float, float]] = None
+
+    if screenshot_bytes:
+        try:
+            screenshot = Image.open(BytesIO(screenshot_bytes))
+            image_w, image_h = screenshot.size
+        except Exception:
+            pass
+
+    if prediction_text and image_w and image_h:
+        try:
+            parsed_actions = parse_action_to_structure_output(
+                prediction_text,
+                factor=1000,
+                origin_resized_height=image_h,
+                origin_resized_width=image_w,
+                model_type=model_type,
+                max_pixels=max_pixels,
+                min_pixels=min_pixels,
+            )
+        except Exception:
+            parsed_actions = []
+
+    ground_truth_op = metadata.get("op")
+    if ground_truth_op and parsed_actions:
+        first_action = parsed_actions[0]
+        parsed_action_type = first_action.get("action_type")
+        parsed_inputs = first_action.get("action_inputs", {})
+        
+        # Convert UITARS action type to Mind2Web op
+        predicted_op = uitars_action_to_mind2web_op(parsed_action_type, parsed_inputs)
+        
+        if predicted_op is not None:
+            gt_op_normalized = ground_truth_op.upper().strip()
+            pred_op_normalized = predicted_op.upper().strip()
+            metrics["action_str_em"] = 1.0 if gt_op_normalized == pred_op_normalized else 0.0
+
+    for parsed in parsed_actions:
+        candidate = _parse_start_point(parsed.get("action_inputs", {}), image_w, image_h)
+        if candidate:
+            predicted_point = candidate
+            break
+
+    bbox = metadata.get("bounding_box")
+    coords = metadata.get("coordinates") or []
+    target_point = metadata.get("target_point") or _center_from_bbox(bbox)
+    if target_point is None and len(coords) >= 2:
+        try:
+            target_point = (float(coords[0]), float(coords[1]))
+        except (TypeError, ValueError):
+            target_point = None
+
+    if predicted_point is not None and bbox:
+        metrics["hit_box_accuracy"] = (
+            1.0 if _point_inside_bbox(predicted_point, bbox) else 0.0
+        )
+
+    if predicted_point is not None and target_point is not None:
+        metrics["bbox_center_mse"] = _mse_distance(predicted_point, target_point)
+
+    return metrics
 
 # ============================================================================
 # Main Prediction Function
