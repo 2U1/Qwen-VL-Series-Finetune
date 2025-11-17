@@ -190,6 +190,11 @@ def main() -> None:
     )
 
     episode_summaries: List[Dict[str, Any]] = []
+    # Global aggregators across all processed episodes/steps.
+    global_metric_totals: Dict[str, float] = defaultdict(float)
+    global_metric_counts: Dict[str, int] = defaultdict(int)
+    global_num_steps: int = 0
+    global_num_episodes: int = 0
 
     jsonl_file: Optional[Any] = None
     if args.output_jsonl is not None:
@@ -214,6 +219,10 @@ def main() -> None:
         nonlocal jsonl_file
         nonlocal metrics_file
         nonlocal episode_summaries
+        nonlocal global_metric_totals
+        nonlocal global_metric_counts
+        nonlocal global_num_steps
+        nonlocal global_num_episodes
 
         logger.info("Evaluating episode '%s'", ep_dir.name)
         agent.reset()
@@ -312,7 +321,7 @@ def main() -> None:
                     "instruction": instruction,
                     "action_uid": metadata.get("action_uid"),
                     "prediction": prediction,
-                    "actions": actions,
+                    "predicted_actions": actions,
                     "metadata": metadata,
                 }
                 if jsonl_file is not None:
@@ -338,6 +347,9 @@ def main() -> None:
                         continue
                     metric_totals[key] += float(value)
                     metric_counts[key] += 1
+                    global_metric_totals[key] += float(value)
+                    global_metric_counts[key] += 1
+                    global_num_steps += 1
                 if is_terminal:
                     logger.info(
                         "Stopping evaluation for episode=%s due to terminal state.",
@@ -377,6 +389,7 @@ def main() -> None:
                 avg = metric_totals[key] / count
                 episode_summary["metrics"][key] = {"mean": avg, "count": count}
         episode_summaries.append(episode_summary)
+        global_num_episodes += 1
 
     if args.episode_dir:
         episode_dir = Path(args.episode_dir)
@@ -405,13 +418,34 @@ def main() -> None:
     if metrics_file is not None:
         metrics_file.close()
 
-    # Optionally write per-episode summary metrics to a compact JSON file.
+    # Optionally write per-episode and global summary metrics to a compact JSON file.
     if args.summary_json is not None:
         summary_path = Path(args.summary_json)
         summary_path.parent.mkdir(parents=True, exist_ok=True)
+        # Build a global aggregate over all processed steps.
+        global_metrics: Dict[str, Any] = {
+            "num_episodes": global_num_episodes,
+            "num_steps": global_num_steps,
+            "metrics": {},
+        }
+        for key in STEP_METRIC_KEYS:
+            count = global_metric_counts.get(key, 0)
+            if count == 0:
+                global_metrics["metrics"][key] = {"mean": None, "count": 0}
+            else:
+                avg = global_metric_totals[key] / count
+                global_metrics["metrics"][key] = {"mean": avg, "count": count}
+
+        payload: Dict[str, Any] = {
+            "episodes": episode_summaries,
+            "global": global_metrics,
+        }
+
         with summary_path.open("w") as f:
-            json.dump(episode_summaries, f, ensure_ascii=False, indent=2)
-        logger.info("Wrote summary metrics to %s", summary_path)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info(
+            "Wrote summary metrics (per-episode and global) to %s", summary_path
+        )
 
 
 if __name__ == "__main__":
