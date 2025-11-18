@@ -47,6 +47,7 @@ deepspeed --num_gpus=$NUM_DEVICES src/train/train_sft.py \
     --deepspeed scripts/zero2.json \
     --model_id "$MODEL_NAME" \
     --seed 42 \
+    --resume_from_checkpoint "$OUTPUT_DIR" \
     --data_path /kaggle/input/600sample-real/llava_training_data.json \
     --image_folder /kaggle/input/train-zaic \
     --remove_unused_columns False \
