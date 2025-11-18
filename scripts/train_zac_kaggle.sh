@@ -34,6 +34,7 @@ deepspeed --num_gpus=$NUM_DEVICES src/train/train_sft.py \
     --use_liger True \
     --deepspeed scripts/zero2.json \
     --model_id "$MODEL_NAME" \
+    --seed 42 \
     --data_path /kaggle/input/zac-sample-600/zac_llava_format.json \
     --image_folder /kaggle/working/videos \
     --remove_unused_columns False \

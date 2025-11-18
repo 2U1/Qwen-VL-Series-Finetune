@@ -1,12 +1,14 @@
 import os
 import torch
+import random
+import numpy as np
 from peft import LoraConfig, get_peft_model
 import ast
 from transformers import (
     AutoProcessor,
-    BitsAndBytesConfig, 
-    Qwen2VLForConditionalGeneration, 
-    HfArgumentParser, 
+    BitsAndBytesConfig,
+    Qwen2VLForConditionalGeneration,
+    HfArgumentParser,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMoeForConditionalGeneration
@@ -29,6 +31,36 @@ local_rank = None
 def rank0_print(*args):
     if local_rank == 0 or local_rank == '0' or local_rank is None:
         print(*args)
+
+def set_seed(seed: int):
+    """
+    Set random seeds for reproducibility across all libraries.
+
+    Args:
+        seed: Random seed value (default from HF TrainingArguments is 42)
+    """
+    rank0_print(f"Setting all random seeds to {seed} for reproducibility...")
+
+    # Python random module
+    random.seed(seed)
+
+    # NumPy
+    np.random.seed(seed)
+
+    # PyTorch CPU
+    torch.manual_seed(seed)
+
+    # PyTorch CUDA (all GPUs)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    # CuDNN settings for reproducibility
+    # Note: Setting deterministic=True may impact performance
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    rank0_print("✓ All random seeds set successfully")
 
 def find_target_linear_names(model, num_lora_modules=-1, lora_namespan_exclude=[], verbose=True):
     linear_cls = torch.nn.modules.Linear
@@ -147,6 +179,11 @@ def train():
         (ModelArguments, DataArguments, TrainingArguments))
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # Set all random seeds for reproducibility
+    # HuggingFace TrainingArguments has default seed=42
+    set_seed(training_args.seed)
+
     use_liger = training_args.use_liger
     if "Qwen2.5" in model_args.model_id:
         # monkey patch the vision model
