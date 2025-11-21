@@ -390,6 +390,7 @@ class UITARSAgent:
         self.top_p: float = float(self.runtime_conf.get("top_p", 0.9))
         self.max_tokens: int = int(self.runtime_conf.get("max_tokens", 512))
         self.language: str = str(self.runtime_conf.get("language", "English"))
+        self.seed: Optional[int] = self.runtime_conf.get("seed")
 
         # Image constraints
         self.max_pixels: int = int(self.runtime_conf.get("max_pixels", MAX_PIXELS))
@@ -487,13 +488,18 @@ class UITARSAgent:
 
         client = OpenAI(base_url=api_url, api_key=api_key)
 
-        response = client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            top_p=self.top_p,
-        )
+        # Build request kwargs, including seed if provided
+        request_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+        }
+        if self.seed is not None:
+            request_kwargs["seed"] = self.seed
+
+        response = client.chat.completions.create(**request_kwargs)
         prediction_text = response.choices[0].message.content.strip()
 
         # Extract raw UITARS action strings from the response.

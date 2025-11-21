@@ -57,9 +57,10 @@ def build_runtime_conf(args: argparse.Namespace) -> Dict[str, Any]:
         "max_pixels": args.max_pixels,
         "min_pixels": args.min_pixels,
         "callusr_tolerance": args.callusr_tolerance,
+        "history_n": args.history_n,
     }
-    if args.history_n is not None:
-        runtime_conf["history_n"] = args.history_n
+    if args.seed is not None:
+        runtime_conf["seed"] = args.seed
     return runtime_conf
 
 
@@ -108,8 +109,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--history_n",
         type=int,
-        default=None,
-        help="How many past screenshots to include. Default None means use class default (5).",
+        default=5,
+        help="How many past screenshots to include. Default is 5.",
     )
     parser.add_argument(
         "--reset_each_step",
@@ -119,13 +120,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_k", type=int, default=-1)
     parser.add_argument("--top_p", type=float, default=0.9)
-    parser.add_argument("--max_tokens", type=int, default=512)
+    parser.add_argument("--max_tokens", type=int, default=1000)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible generation. If not set, generation will be non-deterministic.",
+    )
     parser.add_argument("--max_pixels", type=int, default=16384 * 28 * 28)
     parser.add_argument("--min_pixels", type=int, default=100 * 28 * 28)
     parser.add_argument("--input_swap", action="store_true", help="Use clipboard paste for typing.")
     parser.add_argument("--no-input_swap", dest="input_swap", action="store_false")
     parser.set_defaults(input_swap=True)
-    parser.add_argument("--callusr_tolerance", type=int, default=1)
+    parser.add_argument("--callusr_tolerance", type=int, default=3)
     parser.add_argument(
         "--output_jsonl",
         type=str,

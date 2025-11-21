@@ -1,0 +1,49 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Python Debugger: Current File",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true
+      },
+      {
+        "name": "UITARS15 Runner",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "eval/uitars15_runner.py",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--base_dir",
+          "/mnt/test_splits",
+          "--model",
+          "ByteDance-Seed/UI-TARS-1.5-7B",
+          "--seed",
+          "42",
+          "--instruction_source",
+          "csv_single_instruction",
+          "--csv_instructions",
+          "/mnt/test_split_metadata.csv"
+        ]
+      }
+    ]
+  }
+  
