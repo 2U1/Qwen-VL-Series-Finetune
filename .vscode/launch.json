@@ -22,7 +22,7 @@
         "name": "UITARS15 Runner",
         "type": "debugpy",
         "request": "launch",
-        "program": "eval/uitars15_runner.py",
+        "module": "eval.uitars15_runner",
         "console": "integratedTerminal",
         "python": "${workspaceFolder}/.venv/bin/python",
         "env": {

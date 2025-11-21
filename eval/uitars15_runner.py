@@ -89,7 +89,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--model", type=str, required=True, help="Model name/id for the OpenAI-compatible endpoint.")
-    parser.add_argument("--instruction_source", type=str, choices=["step", "global", "csv"], default="step")
+    parser.add_argument(
+        "--instruction_source",
+        type=str,
+        choices=["step", "global", "csv", "csv_single_instruction", "csv_multi_element_instruction"],
+        default="step"
+    )
     parser.add_argument(
         "--csv_instructions",
         type=str,
