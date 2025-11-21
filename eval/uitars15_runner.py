@@ -230,6 +230,9 @@ def main() -> None:
         # Aggregators
         metric_totals = defaultdict(float)
         metric_counts = defaultdict(int)
+                
+        # Collect step-level data for summary
+        step_data: List[Dict[str, Any]] = []
 
         episode_pred_path = predictions_root / f"{ep_dir.name}.jsonl"
         episode_pred_file: Optional[Any] = episode_pred_path.open("w", encoding="utf-8")
@@ -353,6 +356,15 @@ def main() -> None:
                 # Count every processed step once for global statistics,
                 # regardless of how many metrics are defined for it.
                 global_num_steps += 1
+                                
+                # Collect step data for summary
+                step_data.append({
+                    "step_index": step_index,
+                    "instruction": instruction,
+                    "ground_truth": metadata.get("uitars_actions", []),
+                    "prediction": prediction,
+                })
+
                 if is_terminal:
                     logger.info(
                         "Stopping evaluation for episode=%s due to terminal state.",
@@ -383,6 +395,7 @@ def main() -> None:
             "episode": ep_dir.name,
             "num_steps": num_steps,
             "metrics": {},
+            "steps": step_data,
         }
         for key in STEP_METRIC_KEYS:
             count = metric_counts.get(key, 0)
