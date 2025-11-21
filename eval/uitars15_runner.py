@@ -22,6 +22,7 @@ Set environment variables before running:
     export DOUBAO_API_KEY="your-api-key"
 """
 import argparse
+import ast
 import json
 import os
 import logging
@@ -215,8 +216,8 @@ def _load_csv_instructions(csv_path: str) -> Dict[Tuple[str, int], str]:
         step_index = int(row["step_index"])
         instruction = str(row["step_instruction"]).strip()
         multi_element_instruction = str(row["multi_element_instruction"]).strip()
-        target_coordinates = [float(coord) for coord in str(row["target_coordinates"]).strip().split(",")]
-        target_bounding_box = [float(coord) for coord in str(row["target_bounding_box"]).strip().split(",")]
+        target_coordinates = list(ast.literal_eval(str(row["target_coordinates"]).strip()))
+        target_bounding_box = list(ast.literal_eval(str(row["target_bounding_box"]).strip()))
         lookup[(task_id, step_index)] = {
             "step_instruction": instruction,
             "multi_element_instruction": multi_element_instruction,

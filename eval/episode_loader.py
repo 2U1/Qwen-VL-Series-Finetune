@@ -136,24 +136,28 @@ def load_episode(
             if task_id is None:
                 raise ValueError("Cannot determine task_id from episode_dir for CSV lookup")
             # Look up instruction from CSV using (task_id, step_index)
-            instruction = csv_instruction_lookup.get((task_id, step_idx)).get("step_instruction")
-            if instruction is None:
-                # Fallback to trajectory.json if CSV lookup fails
-                instruction = step.get("step_instruction", "") or step.get("confirmed_task", "")
-                if instruction:
-                    print(f"[episode_loader] WARNING: No CSV instruction for task_id={task_id}, step={step_idx}, using trajectory.json")
+            csv_entry = csv_instruction_lookup.get((task_id, step_idx))
+            if csv_entry is None:
+                # Skip this step if not in CSV lookup table
+                continue
+            instruction = csv_entry.get("step_instruction")
+            if instruction is None or not instruction.strip():
+                # Skip this step if instruction is missing or empty
+                continue
         elif instruction_source == "csv_multi_element_instruction":
             if csv_instruction_lookup is None:
                 raise ValueError("csv_instruction_lookup must be provided when instruction_source='csv_multi_element_instruction'")
             if task_id is None:
                 raise ValueError("Cannot determine task_id from episode_dir for CSV lookup")
             # Look up instruction from CSV using (task_id, step_index)
-            instruction = csv_instruction_lookup.get((task_id, step_idx)).get("multi_element_instruction")
-            if instruction is None:
-                # Fallback to trajectory.json if CSV lookup fails
-                instruction = step.get("multi_element_instruction", "") or step.get("confirmed_task", "")
-                if instruction:
-                    print(f"[episode_loader] WARNING: No CSV instruction for task_id={task_id}, step={step_idx}, using trajectory.json")
+            csv_entry = csv_instruction_lookup.get((task_id, step_idx))
+            if csv_entry is None:
+                # Skip this step if not in CSV lookup table
+                continue
+            instruction = csv_entry.get("multi_element_instruction")
+            if instruction is None or not instruction.strip():
+                # Skip this step if instruction is missing or empty
+                continue
         elif instruction_source == "step":
             instruction = step.get("step_instruction", "") or step.get("confirmed_task", "")
         elif instruction_source == "global":
