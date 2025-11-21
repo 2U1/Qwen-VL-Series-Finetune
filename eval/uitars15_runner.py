@@ -363,6 +363,7 @@ def main() -> None:
                     "instruction": instruction,
                     "ground_truth": metadata.get("uitars_actions", []),
                     "prediction": prediction,
+                    "screenshot_path": metadata.get("screenshot_path"),
                 })
 
                 if is_terminal:

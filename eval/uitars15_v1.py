@@ -352,7 +352,7 @@ def _center_from_bbox(bbox: Sequence[float]) -> Optional[Tuple[float, float]]:
 def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     dx = p1[0] - p2[0]
     dy = p1[1] - p2[1]
-    return (dx * dx + dy * dy) / 2.0
+    return (dx * dx + dy * dy)
 
 
 def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:

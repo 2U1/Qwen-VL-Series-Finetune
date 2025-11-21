@@ -155,6 +155,8 @@ def load_episode(
         if target_point is not None:
             annotated_step["target_point"] = target_point
 
+        annotated_step["screenshot_path"] = str(img_path)
+
         yield instruction, obs, annotated_step
 
 
