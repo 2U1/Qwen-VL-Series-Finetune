@@ -28,8 +28,9 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
+import pandas as pd
 from tqdm import tqdm
 
 from eval.episode_loader import load_episode
@@ -67,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--episode_dir", type=str, help="Path to outputs/<run>/<episode> directory.")
     input_group.add_argument("--run_dir", type=str, help="Path to a run directory containing episode subdirectories.")
+    input_group.add_argument("--base_dir", type=str, help="Path to base directory containing multiple run directories.")
     parser.add_argument(
         "--output_root",
         type=str,
@@ -86,7 +88,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--model", type=str, required=True, help="Model name/id for the OpenAI-compatible endpoint.")
-    parser.add_argument("--instruction_source", type=str, choices=["step", "global"], default="step")
+    parser.add_argument("--instruction_source", type=str, choices=["step", "global", "csv"], default="step")
+    parser.add_argument(
+        "--csv_instructions",
+        type=str,
+        default=None,
+        help="Path to CSV file with instructions. Required when --instruction_source=csv. "
+             "CSV should have columns: task_id, step_index, step_instruction"
+    )
     parser.add_argument(
         "--observation_type",
         type=str,
@@ -155,6 +164,57 @@ def _iter_episode_dirs(run_dir: Path):
             yield child
 
 
+def _iter_run_dirs(base_dir: Path):
+    """Yield run directories that contain task subdirectories."""
+    if not base_dir.is_dir():
+        raise NotADirectoryError(f"Invalid base_dir: {base_dir}")
+    for child in sorted(base_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        # Check if this directory contains task folders (subdirectories with screenshots/)
+        has_task_folders = False
+        for task_dir in child.iterdir():
+            if task_dir.is_dir() and (task_dir / "screenshots").is_dir():
+                has_task_folders = True
+                break
+        if has_task_folders:
+            yield child
+
+
+def _load_csv_instructions(csv_path: str) -> Dict[Tuple[str, int], str]:
+    """
+    Load CSV and create a lookup dict mapping (task_id, step_index) -> step_instruction.
+    
+    Args:
+        csv_path: Path to CSV file with columns: task_id, step_index, step_instruction
+    
+    Returns:
+        Dict mapping (task_id, step_index) -> step_instruction
+    """
+    df = pd.read_csv(csv_path)
+    required_cols = ["task_id", "step_index", "step_instruction", "multi_element_instruction", "target_coordinates", "target_bounding_box"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"CSV missing required columns: {missing_cols}")
+    
+    lookup = {}
+    for _, row in df.iterrows():
+        task_id = str(row["task_id"]).strip()
+        step_index = int(row["step_index"])
+        instruction = str(row["step_instruction"]).strip()
+        multi_element_instruction = str(row["multi_element_instruction"]).strip()
+        target_coordinates = [float(coord) for coord in str(row["target_coordinates"]).strip().split(",")]
+        target_bounding_box = [float(coord) for coord in str(row["target_bounding_box"]).strip().split(",")]
+        lookup[(task_id, step_index)] = {
+            "step_instruction": instruction,
+            "multi_element_instruction": multi_element_instruction,
+            "target_coordinates": target_coordinates,
+            "target_bounding_box": target_bounding_box,
+        }
+    
+    return lookup
+
+
 def main() -> None:
     args = parse_args()
 
@@ -180,6 +240,15 @@ def main() -> None:
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         )
+
+    # Load CSV instructions if using CSV source
+    csv_instruction_lookup: Optional[Dict[Tuple[str, int], str]] = None
+    if args.instruction_source == "csv_single_instruction" or args.instruction_source == "csv_multi_element_instruction":
+        if args.csv_instructions is None:
+            raise ValueError("--csv_instructions is required when --instruction_source=csv_single_instruction or --instruction_source=csv_multi_element_instruction")
+        logger.info("Loading instructions from CSV: %s", args.csv_instructions)
+        csv_instruction_lookup = _load_csv_instructions(args.csv_instructions)
+        logger.info("Loaded %d entries from CSV", len(csv_instruction_lookup))
 
     runtime_conf = build_runtime_conf(args)
     agent = UITARSAgent(
@@ -240,7 +309,9 @@ def main() -> None:
         try:
             step_index = -1
             step_iterator = load_episode(
-                str(ep_dir), instruction_source=args.instruction_source
+                str(ep_dir), 
+                instruction_source=args.instruction_source,
+                csv_instruction_lookup=csv_instruction_lookup
             )
             for step_index, (instruction, obs, metadata) in enumerate(
                 tqdm(step_iterator, desc=f"Steps [{ep_dir.name}]", unit="step")
@@ -413,7 +484,7 @@ def main() -> None:
         if not episode_dir.is_dir():
             raise NotADirectoryError(f"Invalid episode_dir: {episode_dir}")
         evaluate_one_episode(episode_dir)
-    else:
+    elif args.run_dir:
         run_dir = Path(args.run_dir)
         episode_dirs = list(_iter_episode_dirs(run_dir))
         logger.info("Found %d episode(s) under run_dir=%s", len(episode_dirs), run_dir)
@@ -429,6 +500,38 @@ def main() -> None:
             )
         for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
             evaluate_one_episode(ep)
+    elif args.base_dir:  # args.base_dir
+        base_dir = Path(args.base_dir)
+        run_dirs = list(_iter_run_dirs(base_dir))
+        logger.info("Found %d run directory(ies) under base_dir=%s", len(run_dirs), base_dir)
+        
+        # Process each run directory separately
+        for run_dir in tqdm(run_dirs, desc="Run directories", unit="run"):
+            logger.info("=" * 80)
+            logger.info("Processing run directory: %s", run_dir.name)
+            logger.info("=" * 80)
+            
+            episode_dirs = list(_iter_episode_dirs(run_dir))
+            logger.info("Found %d episode(s) in run_dir=%s", len(episode_dirs), run_dir.name)
+            
+            if len(episode_dirs) == 0:
+                logger.warning("No episodes found in run_dir=%s, skipping", run_dir.name)
+                continue
+            
+            # Optionally limit the number of episodes evaluated per run directory
+            if args.max_episodes is not None:
+                if args.max_episodes < 0:
+                    raise ValueError("--max_episodes must be non-negative if provided.")
+                episode_dirs = episode_dirs[: args.max_episodes]
+                logger.info(
+                    "Restricting evaluation to first %d episode(s) in this run directory.",
+                    len(episode_dirs),
+                )
+            
+            for ep in tqdm(episode_dirs, desc=f"Episodes [{run_dir.name}]", unit="episode"):
+                evaluate_one_episode(ep)
+            
+            logger.info("Completed processing run directory: %s", run_dir.name)
     
     if jsonl_file is not None:
         jsonl_file.close()

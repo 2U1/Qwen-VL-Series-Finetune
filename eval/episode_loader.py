@@ -9,7 +9,7 @@ Usage:
 """
 import json
 from pathlib import Path
-from typing import Dict, Iterator, Tuple, Optional, List, Union
+from typing import Dict, Iterator, Tuple, Optional, List, Union, Any
 
 from eval.mind2web_mapping import mind2web_step_to_uitars
 
@@ -52,13 +52,19 @@ def _target_point_from_step(step: Dict) -> Optional[Tuple[float, float]]:
 def load_episode(
     episode_dir: str,
     instruction_source: str = "step",
+    csv_instruction_lookup: Optional[Any] = None,
 ) -> Iterator[Tuple[str, Dict, Dict]]:
     """
     Load trajectory from episode_dir and yield (instruction, obs, metadata) per step.
     
     Args:
         episode_dir: Path to outputs/<run>/<episode>/
-        instruction_source: "step" for step_instruction, "global" for confirmed_task
+        instruction_source: "step" for step_instruction, "global" for confirmed_task, 
+                           "csv_single_instruction" to use step_instruction from csv,
+                           or "csv_multi_element_instruction" to use multi_element_instruction from csv,
+        csv_instruction_lookup: Optional dict mapping (task_id, step_index) -> step_instruction, multi_element_instruction, target_coordinates, target_bounding_box.
+                               Used when instruction_source="csv_single_instruction" or "csv_multi_element_instruction". The task_id should match
+                               the episode folder name.
     
     Yields:
         instruction: Text instruction for the step
@@ -66,6 +72,7 @@ def load_episode(
         metadata: Original step dict from trajectory.json
     """
     episode_path = Path(episode_dir)
+
     trajectory_path = episode_path / "trajectory.json"
     if not trajectory_path.is_file():
         raise FileNotFoundError(f"trajectory.json not found at: {trajectory_path}")
@@ -119,18 +126,46 @@ def load_episode(
             f"  Examples: {extra_images[:5]}"
         )
 
+    # Get task_id from episode folder name for CSV lookup
+    task_id = episode_path.name if csv_instruction_lookup is not None else None
+    
     for step_idx, (step, img_path) in enumerate(zip(steps, resolved_paths)):
-        if instruction_source == "step":
+        if instruction_source == "csv_single_instruction":
+            if csv_instruction_lookup is None:
+                raise ValueError("csv_instruction_lookup must be provided when instruction_source='csv'")
+            if task_id is None:
+                raise ValueError("Cannot determine task_id from episode_dir for CSV lookup")
+            # Look up instruction from CSV using (task_id, step_index)
+            instruction = csv_instruction_lookup.get((task_id, step_idx)).get("step_instruction")
+            if instruction is None:
+                # Fallback to trajectory.json if CSV lookup fails
+                instruction = step.get("step_instruction", "") or step.get("confirmed_task", "")
+                if instruction:
+                    print(f"[episode_loader] WARNING: No CSV instruction for task_id={task_id}, step={step_idx}, using trajectory.json")
+        elif instruction_source == "csv_multi_element_instruction":
+            if csv_instruction_lookup is None:
+                raise ValueError("csv_instruction_lookup must be provided when instruction_source='csv_multi_element_instruction'")
+            if task_id is None:
+                raise ValueError("Cannot determine task_id from episode_dir for CSV lookup")
+            # Look up instruction from CSV using (task_id, step_index)
+            instruction = csv_instruction_lookup.get((task_id, step_idx)).get("multi_element_instruction")
+            if instruction is None:
+                # Fallback to trajectory.json if CSV lookup fails
+                instruction = step.get("multi_element_instruction", "") or step.get("confirmed_task", "")
+                if instruction:
+                    print(f"[episode_loader] WARNING: No CSV instruction for task_id={task_id}, step={step_idx}, using trajectory.json")
+        elif instruction_source == "step":
             instruction = step.get("step_instruction", "") or step.get("confirmed_task", "")
         elif instruction_source == "global":
             instruction = step.get("confirmed_task", "") or step.get("step_instruction", "")
         else:
-            raise ValueError("instruction_source must be 'step' or 'global'")
+            raise ValueError("instruction_source must be 'step', 'global', 'csv_single_instruction', or 'csv_multi_element_instruction'")
         
         if not instruction or not instruction.strip():
             raise ValueError(
                 f"Step {step_idx} has empty instruction. "
-                f"Both 'step_instruction' and 'confirmed_task' are missing or empty."
+                f"Both 'step_instruction' and 'confirmed_task' are missing or empty, "
+                f"and CSV lookup (if used) returned None."
             )
 
         try:
@@ -151,9 +186,13 @@ def load_episode(
         except Exception as e:
             raise RuntimeError(f"Step {step_idx}: Failed to convert to UITARS actions: {e}") from e
         annotated_step["uitars_actions"] = uitars_actions
-        target_point = _target_point_from_step(step)
-        if target_point is not None:
-            annotated_step["target_point"] = target_point
+        if instruction_source == "csv_single_instruction" or instruction_source == "csv_multi_element_instruction":
+            annotated_step["target_coordinates"] = csv_instruction_lookup.get((task_id, step_idx)).get("target_coordinates")
+            annotated_step["target_bounding_box"] = csv_instruction_lookup.get((task_id, step_idx)).get("target_bounding_box")
+        else:
+            target_point = _target_point_from_step(step)
+            if target_point is not None:
+                annotated_step["target_point"] = target_point
 
         annotated_step["screenshot_path"] = str(img_path)
 
