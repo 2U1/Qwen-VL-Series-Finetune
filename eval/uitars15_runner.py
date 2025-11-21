@@ -305,6 +305,7 @@ def main() -> None:
         nonlocal global_metric_counts
         nonlocal global_num_steps
         nonlocal global_num_episodes
+        nonlocal predictions_root
 
         logger.info("Evaluating episode '%s'", ep_dir.name)
         agent.reset()
@@ -424,6 +425,9 @@ def main() -> None:
                         "action_uid": metadata.get("action_uid"),
                         "op": metadata.get("op"),
                         "ground_truth_actions": metadata.get("uitars_actions", []),
+                        "prediction": prediction,
+                        "predicted_actions": actions,
+                        "screenshot_path": metadata.get("screenshot_path"),
                         "metrics": metrics,
                     }
                     metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
@@ -513,22 +517,50 @@ def main() -> None:
             )
         for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
             evaluate_one_episode(ep)
-    elif args.base_dir:  # args.base_dir
+    elif args.base_dir:
         base_dir = Path(args.base_dir)
         run_dirs = list(_iter_run_dirs(base_dir))
         logger.info("Found %d run directory(ies) under base_dir=%s", len(run_dirs), base_dir)
         
-        # Process each run directory separately
+        # Process each run directory separately with its own output directory
         for run_dir in tqdm(run_dirs, desc="Run directories", unit="run"):
             logger.info("=" * 80)
             logger.info("Processing run directory: %s", run_dir.name)
             logger.info("=" * 80)
+            
+            # Create output directory named after the run directory
+            if args.output_root is not None:
+                run_output_root = Path(args.output_root) / run_dir.name
+            else:
+                run_output_root = cwd / run_dir.name
+            run_output_root.mkdir(parents=True, exist_ok=True)
+            
+            # Set up per-run output paths
+            run_predictions_root = run_output_root / "uitars_predictions"
+            run_predictions_root.mkdir(parents=True, exist_ok=True)
+            
+            # Update predictions_root for this run
+            original_predictions_root = predictions_root
+            predictions_root = run_predictions_root
+            
+            # Set up per-run metrics and summary files
+            run_metrics_jsonl = run_output_root / "uitars_metrics.jsonl"
+            run_summary_json = run_output_root / "uitars_summary.json"
+            
+            # Reset aggregators for this run (each run is independent)
+            metrics_file = run_metrics_jsonl.open("w")
+            episode_summaries = []
+            global_metric_totals = defaultdict(float)
+            global_metric_counts = defaultdict(int)
+            global_num_steps = 0
+            global_num_episodes = 0
             
             episode_dirs = list(_iter_episode_dirs(run_dir))
             logger.info("Found %d episode(s) in run_dir=%s", len(episode_dirs), run_dir.name)
             
             if len(episode_dirs) == 0:
                 logger.warning("No episodes found in run_dir=%s, skipping", run_dir.name)
+                metrics_file.close()
                 continue
             
             # Optionally limit the number of episodes evaluated per run directory
@@ -543,6 +575,39 @@ def main() -> None:
             
             for ep in tqdm(episode_dirs, desc=f"Episodes [{run_dir.name}]", unit="episode"):
                 evaluate_one_episode(ep)
+            
+            # Write summary for this run
+            metrics_file.close()
+            if run_summary_json is not None:
+                summary_path = Path(run_summary_json)
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                # Build a global aggregate over all processed steps for this run.
+                run_global_metrics: Dict[str, Any] = {
+                    "num_episodes": global_num_episodes,
+                    "num_steps": global_num_steps,
+                    "metrics": {},
+                }
+                for key in STEP_METRIC_KEYS:
+                    count = global_metric_counts.get(key, 0)
+                    if count == 0:
+                        run_global_metrics["metrics"][key] = {"mean": None, "count": 0}
+                    else:
+                        avg = global_metric_totals[key] / count
+                        run_global_metrics["metrics"][key] = {"mean": avg, "count": count}
+
+                payload: Dict[str, Any] = {
+                    "episodes": episode_summaries,
+                    "global": run_global_metrics,
+                }
+
+                with summary_path.open("w") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                logger.info(
+                    "Wrote summary metrics (per-episode and global) to %s", summary_path
+                )
+            
+            # Restore predictions_root for next iteration (though it will be overwritten anyway)
+            predictions_root = original_predictions_root
             
             logger.info("Completed processing run directory: %s", run_dir.name)
     
