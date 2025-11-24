@@ -95,6 +95,14 @@ Action: ...
 {instruction}
 """
 
+# GTA1-style system prompt: instruct model to return a single coordinate pair
+GTA1_SYSTEM_PROMPT = (
+    "You are an expert UI element locator. "
+    "Given a GUI image and a user's element description, provide the coordinates of the specified element as a single (x,y) point. "
+    "The image resolution is height {height} and width {width}. For elements with area, return the center point.\n\n"
+    "Output the coordinate pair exactly:\n(x,y)"
+)
+
 # ============================================================================
 # Helper Functions (from uitars15_v1.py)
 # ============================================================================
@@ -416,14 +424,45 @@ class UITARSAgent:
           - A single text entry with the UITARS prompt (including action space).
           - One image entry per screenshot in the history, oldest to newest.
         """
-        # Format textual prompt with action space and instruction.
-        prompt = UITARS_USR_PROMPT_THOUGHT.format(
-            action_space=UITARS_ACTION_SPACE,
-            language=self.language,
-            instruction=instruction,
-        )
+        # Switch prompt style based on runtime configuration
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
 
-        user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        user_content: List[Dict[str, Any]] = []
+        system_text = "You are a helpful assistant."
+
+        if prompt_style == "gta1":
+            # Determine dimensions from the latest frame if possible
+            img_w = img_h = None
+            try:
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
+
+            if img_w is not None and img_h is not None:
+                system_text = GTA1_SYSTEM_PROMPT.format(height=img_h, width=img_w)
+            else:
+                # Fallback system text without explicit dimensions
+                system_text = (
+                    "You are an expert UI element locator. Given a GUI image and a user's element description, "
+                    "provide the coordinates of the specified element as a single (x,y) point. For elements with area, "
+                    "return the center point.\n\nOutput the coordinate pair exactly:\n(x,y)"
+                )
+
+            # For GTA1, the user message is only the instruction text
+            user_content.append({"type": "text", "text": instruction})
+        else:
+            # Default UITARS prompt with action space and instruction
+            prompt = UITARS_USR_PROMPT_THOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
+                instruction=instruction,
+            )
+            user_content.append({"type": "text", "text": prompt})
 
         # Attach each screenshot in history as an image_url.
         for screenshot_bytes in self._screenshot_history:
@@ -446,7 +485,7 @@ class UITARSAgent:
         messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                "content": [{"type": "text", "text": system_text}],
             },
             {
                 "role": "user",
@@ -502,7 +541,29 @@ class UITARSAgent:
         response = client.chat.completions.create(**request_kwargs)
         prediction_text = response.choices[0].message.content.strip()
 
-        # Extract raw UITARS action strings from the response.
+        # If GTA1 prompt style is used, convert coordinates to UITARS-style click action
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
+        if prompt_style == "gta1":
+            try:
+                m = re.search(r"\((-?\d*\.?\d+),\s*(-?\d*\.?\d+)\)", prediction_text)
+                if m:
+                    x_s, y_s = m.groups()
+                    # Prefer ints when applicable to match typical formatting
+                    def fmt_num(s: str) -> str:
+                        try:
+                            v = float(s)
+                            if abs(v - int(v)) < 1e-6:
+                                return str(int(v))
+                            return str(v)
+                        except Exception:
+                            return s
+                    x_out, y_out = fmt_num(x_s), fmt_num(y_s)
+                    prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+            except Exception:
+                # Leave prediction_text unchanged on parse failure
+                pass
+
+        # Extract raw UITARS action strings from the (possibly rewritten) response.
         actions = _split_action_strings(prediction_text)
         return prediction_text, actions
 
