@@ -103,6 +103,33 @@ GTA1_SYSTEM_PROMPT = (
     "Output the coordinate pair exactly:\n(x,y)"
 )
 
+# Qwen2.5-VL "tools"-style system prompt template. Follows the guided function-calling
+# pattern and includes screen width/height placeholders.
+QWEN25_TOOLS_SYSTEM_TEMPLATE = (
+    "You are a helpful assistant.\n\n\n"
+    "# Tools\n\n"
+    "You may call one or more functions to assist with the user query.\n\n"
+    "You are provided with function signatures within <tools></tools> XML tags:\n"
+    "<tools>\n"
+    "{\"type\": \"function\", \"function\": {\"name_for_human\": \"computer_use\", \"name\": \"computer_use\", \"description\": \"Use a mouse and keyboard to interact with a computer, and take screenshots.\\n* This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions. E.g. if you click on Firefox and a window doesn't open, try wait and taking another screenshot.\\n* The screen's resolution is {screen_width}x{screen_height}.\\n* Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.\\n* If you tried clicking on a program or link but it failed to load, even after waiting, try adjusting your cursor position so that the tip of the cursor visually falls on the element that you want to click.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.\", \"parameters\": {\"properties\": {\"action\": {\"description\": \"The action to perform. The available actions are:\\n* `key`: Performs key down presses on the arguments passed in order, then performs key releases in reverse order.\\n* `type`: Type a string of text on the keyboard.\\n* `mouse_move`: Move the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `left_click`: Click the left mouse button.\\n* `left_click_drag`: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `right_click`: Click the right mouse button.\\n* `middle_click`: Click the middle mouse button.\\n* `double_click`: Double-click the left mouse button.\\n* `scroll`: Performs a scroll of the mouse scroll wheel.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `terminate`: Terminate the current task and report its completion status.\", \"enum\": [\"key\", \"type\", \"mouse_move\", \"left_click\", \"left_click_drag\", \"right_click\", \"middle_click\", \"double_click\", \"scroll\", \"wait\", \"terminate\"], \"type\": \"string\"}, \"keys\": {\"description\": \"Required only by `action=key`.\", \"type\": \"array\"}, \"text\": {\"description\": \"Required only by `action=type`.\", \"type\": \"string\"}, \"coordinate\": {\"description\": \"(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=mouse_move` and `action=left_click_drag`.\", \"type\": \"array\"}, \"pixels\": {\"description\": \"The amount of scrolling to perform. Positive values scroll up, negative values scroll down. Required only by `action=scroll`.\", \"type\": \"number\"}, \"time\": {\"description\": \"The seconds to wait. Required only by `action=wait`.\", \"type\": \"number\"}, \"status\": {\"description\": \"The status of the task. Required only by `action=terminate`.\", \"type\": \"string\", \"enum\": [\"success\", \"failure\"]}}, \"required\": [\"action\"], \"type\": \"object\"}, \"args_format\": \"Format the arguments as a JSON object.\"}\n"
+    "</tools>\n\n"
+    "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n"
+)
+
+def _render_qwen25_tools_system(screen_width: int, screen_height: int) -> str:
+    """Safely render the Qwen2.5 tools system template without str.format.
+
+    The template contains many literal JSON braces; using str.format would treat
+    them as placeholders and raise KeyError. We only replace the explicit
+    {screen_width} and {screen_height} tokens.
+    """
+    return (
+        QWEN25_TOOLS_SYSTEM_TEMPLATE
+        .replace("{screen_width}", str(screen_width))
+        .replace("{screen_height}", str(screen_height))
+    )
+
 # ============================================================================
 # Helper Functions (from uitars15_v1.py)
 # ============================================================================
@@ -455,6 +482,27 @@ class UITARSAgent:
 
             # For GTA1, the user message is only the instruction text
             user_content.append({"type": "text", "text": instruction})
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
+            # Prepare a guided tools-style system prompt with screen dimensions
+            img_w = img_h = None
+            try:
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
+
+            if img_w is not None and img_h is not None:
+                system_text = _render_qwen25_tools_system(img_w, img_h)
+            else:
+                # Default to a generic tools prompt if we cannot infer dims
+                system_text = _render_qwen25_tools_system(1920, 1080)
+
+            # User sends instruction only; image is attached below
+            user_content.append({"type": "text", "text": instruction})
         else:
             # Default UITARS prompt with action space and instruction
             prompt = UITARS_USR_PROMPT_THOUGHT.format(
@@ -541,7 +589,7 @@ class UITARSAgent:
         response = client.chat.completions.create(**request_kwargs)
         prediction_text = response.choices[0].message.content.strip()
 
-        # If GTA1 prompt style is used, convert coordinates to UITARS-style click action
+        # If GTA1 or Qwen2.5 tools prompt style is used, rewrite to UITARS-style action
         prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
         if prompt_style == "gta1":
             try:
@@ -561,6 +609,52 @@ class UITARSAgent:
                     prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
             except Exception:
                 # Leave prediction_text unchanged on parse failure
+                pass
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
+            try:
+                # Try to extract a JSON object inside <tool_call> ... </tool_call>
+                tool_json = None
+                m = re.search(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|$)", prediction_text, re.DOTALL)
+                if m:
+                    tool_json = m.group(1)
+                else:
+                    # Fallback: try to find a coordinate array in the text
+                    m2 = re.search(r"\[\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*(?:,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*))?\]", prediction_text)
+                    if m2:
+                        groups = [g for g in m2.groups() if g is not None]
+                        coords = [float(g) for g in groups]
+                        if len(coords) >= 2:
+                            if len(coords) >= 4:
+                                x1, y1, x2, y2 = coords[:4]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = coords[:2]
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+
+                if tool_json is not None:
+                    import json as _json
+                    try:
+                        payload = _json.loads(tool_json)
+                        args = payload.get("arguments") or {}
+                        coord = args.get("coordinate")
+                        cx = cy = None
+                        if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                            if len(coord) >= 4:
+                                x1, y1, x2, y2 = [float(x) for x in coord[:4]]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = [float(x) for x in coord[:2]]
+                        if cx is not None and cy is not None:
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
         # Extract raw UITARS action strings from the (possibly rewritten) response.
