@@ -3,7 +3,10 @@ import os
 import sys
 import shutil
 from pathlib import Path
+import math
+from PIL import Image
 
+#The following is borrwed from the UI Tars Codebase
 UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
 ## Output Format
 ```
@@ -23,6 +26,99 @@ call_user() # Submit the task and call the user when the task is unsolvable, or 
 ## User Instruction
 {instruction}
 """
+
+IMAGE_FACTOR = 28
+MIN_PIXELS = 100 * 28 * 28
+MAX_PIXELS = 16384 * 28 * 28
+MAX_RATIO = 200
+
+def round_by_factor(number: int, factor: int) -> int:
+    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: int, factor: int) -> int:
+    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    return math.floor(number / factor) * factor
+
+def smart_resize(height: int,
+                 width: int,
+                 factor: int = IMAGE_FACTOR,
+                 min_pixels: int = MIN_PIXELS,
+                 max_pixels: int = MAX_PIXELS) -> tuple[int, int]:
+    """
+    Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+    """
+    if max(height, width) / min(height, width) > MAX_RATIO:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
+
+def get_image_dimensions(image_path: str) -> tuple[int, int]:
+    """
+    Get the width and height of an image from its file path.
+    
+    Args:
+        image_path: Path to the image file
+    
+    Returns:
+        (width, height): Tuple containing the image width and height in pixels
+    """
+    try:
+        with Image.open(image_path) as img:
+            width, height = img.size
+            return width, height
+    except Exception as e:
+        raise ValueError(f"Failed to load image from {image_path}: {e}")
+
+
+def prepare_training_coordinate(original_x, original_y, original_width, original_height):
+    """
+    Convert original image coordinates to smart-resized space for training.
+    
+    Args:
+        original_x, original_y: Click position in original image
+        original_width, original_height: Original image dimensions
+    
+    Returns:
+        training_x, training_y: Coordinates in smart-resized space
+    """
+    # Get smart-resized dimensions
+    smart_h, smart_w = smart_resize(
+        height=original_height,
+        width=original_width,
+        factor=IMAGE_FACTOR,
+        min_pixels=MIN_PIXELS,
+        max_pixels=MAX_PIXELS
+    )
+    
+    # Scale coordinates
+    training_x = int(original_x * smart_w / original_width)
+    training_y = int(original_y * smart_h / original_height)
+    
+    return training_x, training_y
 
 def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
     """Process a single subdirectory containing trajectory.json and screenshots."""
@@ -75,6 +171,7 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
     # Build conversations list with one human/gpt pair per trajectory step
     conversations = []
     
+    image_idx = 0
     for example in trajectory_data:
         step_instruction = example.get("step_instruction")
         op = example.get("op")
@@ -85,6 +182,8 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
         if step_instruction is None or op is None or coordinates is None:
             continue
         
+        original_width, original_height = get_image_dimensions(image_paths[image_idx])
+        coordinates = prepare_training_coordinate(coordinates[0], coordinates[1], original_width, original_height)
         prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
 
         # Mind2Web has actions: Click, Type, Hover, Press Enter, Click (Fake) and Ignore. 
@@ -107,6 +206,7 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
             "from": "gpt",
             "value": prediction
         })
+        image_idx += 1
     
     if not conversations:
         print(f"  Warning: No valid conversations generated for {subdir_path}, skipping...")
