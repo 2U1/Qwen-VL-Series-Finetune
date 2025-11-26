@@ -142,8 +142,8 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Do not reset agent state between steps (allows history across steps).",
     )
-    # Preserve historical default: do not reset between steps unless explicitly requested
-    parser.set_defaults(reset_each_step=False)
+    # Default to resetting between steps (stateless per-step prompts)
+    parser.set_defaults(reset_each_step=True)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_k", type=int, default=-1)
     parser.add_argument("--top_p", type=float, default=0.9)
