@@ -70,6 +70,7 @@ UITARS_USR_PROMPT_THOUGHT = """You are a GUI agent. You are given a task and you
 
 ## Output Format
 ```
+Thought: ...
 Action: ...
 ```
 
@@ -519,6 +520,14 @@ class UITARSAgent:
 
             # User sends instruction only; image is attached below
             user_content.append({"type": "text", "text": instruction})
+        elif prompt_style == "uitars15_nothought":
+            prompt = UITARS_USR_PROMPT_NOTHOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
+                instruction=instruction,
+            )
+            user_content.append({"type": "text", "text": prompt})
+
         else:
             # Default UITARS prompt with action space and instruction
             prompt = UITARS_USR_PROMPT_THOUGHT.format(
