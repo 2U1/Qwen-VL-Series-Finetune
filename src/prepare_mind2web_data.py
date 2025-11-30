@@ -7,7 +7,7 @@ import math
 from PIL import Image
 
 #The following is borrwed from the UI Tars Codebase
-UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
+UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task.
 ## Output Format
 ```
 Action: ...
@@ -79,10 +79,8 @@ def smart_resize(height: int,
 def get_image_dimensions(image_path: str) -> tuple[int, int]:
     """
     Get the width and height of an image from its file path.
-    
     Args:
         image_path: Path to the image file
-    
     Returns:
         (width, height): Tuple containing the image width and height in pixels
     """
@@ -94,14 +92,12 @@ def get_image_dimensions(image_path: str) -> tuple[int, int]:
         raise ValueError(f"Failed to load image from {image_path}: {e}")
 
 
-def prepare_training_coordinate(original_x, original_y, original_width, original_height):
+def prepare_training_coordinates(original_x, original_y, original_width, original_height):
     """
     Convert original image coordinates to smart-resized space for training.
-    
     Args:
         original_x, original_y: Click position in original image
         original_width, original_height: Original image dimensions
-    
     Returns:
         training_x, training_y: Coordinates in smart-resized space
     """
@@ -113,23 +109,23 @@ def prepare_training_coordinate(original_x, original_y, original_width, original
         min_pixels=MIN_PIXELS,
         max_pixels=MAX_PIXELS
     )
-    
+
     # Scale coordinates
     training_x = int(original_x * smart_w / original_width)
     training_y = int(original_y * smart_h / original_height)
-    
-    return training_x, training_y
+
+    return (training_x, training_y)
 
 def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
     """Process a single subdirectory containing trajectory.json and screenshots."""
     trajectory_path = os.path.join(subdir_path, "trajectory.json")
     screenshots_path = os.path.join(subdir_path, "screenshots")
-    
+
     # Check if trajectory.json exists
     if not os.path.exists(trajectory_path):
         print(f"  Warning: No trajectory.json found in {subdir_path}, skipping...")
         return None
-    
+
     # Load trajectory data
     try:
         with open(trajectory_path, 'r') as f:
@@ -137,21 +133,21 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
     except Exception as e:
         print(f"  Error loading {trajectory_path}: {e}, skipping...")
         return None
-    
+
     print(f"  Successfully loaded {len(trajectory_data)} items from {trajectory_path}")
-    
+
     # Get all screenshots in order
     if not os.path.exists(screenshots_path):
         print(f"  Warning: No screenshots directory found in {subdir_path}, skipping...")
         return None
-    
+
     # Get all screenshot files and sort them
-    screenshot_files = sorted([f for f in os.listdir(screenshots_path) if f.endswith('.png')])
-    
+    screenshot_files = sorted([f for f in os.listdir(screenshots_path) if f.endswith('.png')], key=lambda x: int(x.split('_')[1]))
+
     if not screenshot_files:
         print(f"  Warning: No screenshots found in {screenshots_path}, skipping...")
         return None
-    
+
     # Copy screenshots to output directory with prepended subdirectory name
     image_paths = []
     for screenshot_file in screenshot_files:
@@ -159,7 +155,7 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
         # Prepend subdirectory name to make filename unique
         new_filename = f"{subdir_name}_{screenshot_file}"
         dst_path = os.path.join(output_screenshots_dir, new_filename)
-        
+
         try:
             shutil.copy2(src_path, dst_path)
             # Store relative path from data directory
@@ -167,37 +163,37 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
         except Exception as e:
             print(f"  Warning: Failed to copy {src_path} to {dst_path}: {e}")
             continue
-    
+
     # Build conversations list with one human/gpt pair per trajectory step
     conversations = []
-    
+
     image_idx = 0
     for example in trajectory_data:
         step_instruction = example.get("step_instruction")
         op = example.get("op")
         coordinates = example.get("coordinates")
         type_action_value = example.get("type_action_value")
-        
+
         # Skip if any of these necessary fields is missing
         if step_instruction is None or op is None or coordinates is None:
             continue
-        
-        original_width, original_height = get_image_dimensions(image_paths[image_idx])
-        coordinates = prepare_training_coordinate(coordinates[0], coordinates[1], original_width, original_height)
+
         prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
 
-        # Mind2Web has actions: Click, Type, Hover, Press Enter, Click (Fake) and Ignore. 
+        # Mind2Web has actions: Click, Type, Hover, Press Enter, Click (Fake) and Ignore.
         # Map these actions to the UI Tars actions
         prediction = ""
         if op.lower() == "click" or op.lower() == "hover" or op.lower() == "click (fake)":
-            prediction = f"Action: click(start_box='({coordinates[0]}, {coordinates[1]})')"
+            original_width, original_height = get_image_dimensions(os.path.join(screenshots_path, screenshot_files[image_idx]))
+            normalized_coordinates = prepare_training_coordinates(coordinates[0], coordinates[1], original_width, original_height)
+            prediction = f"Action: click(start_box='({normalized_coordinates[0]}, {normalized_coordinates[1]})')"
         elif op.lower() == "type":
             prediction = f"Action: type(content='{type_action_value}')'"
         elif op.lower() == "press enter":
             prediction = f"Action: type(content='\\n')'"
         elif op.lower() == "ignore":
             prediction = f"Action: wait()"
-        
+
         conversations.append({
             "from": "human",
             "value": prompt
@@ -207,20 +203,19 @@ def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
             "value": prediction
         })
         image_idx += 1
-    
+
     if not conversations:
         print(f"  Warning: No valid conversations generated for {subdir_path}, skipping...")
         return None
-    
+
     # Create single entry for this subdirectory
     entry = {
         "id": subdir_name,
         "image": image_paths,
         "conversations": conversations
     }
-    
-    return entry
 
+    return entry
 
 def main():
     # Check for command line argument
