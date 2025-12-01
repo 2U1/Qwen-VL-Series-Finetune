@@ -334,8 +334,7 @@ def _split_action_strings(prediction_text: str) -> List[str]:
 
 
 def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_h: Optional[int], 
-                       model_type: str = "qwen25vl", smart_resize_height: Optional[int] = None, 
-                       smart_resize_width: Optional[int] = None) -> Optional[Tuple[float, float]]:
+                       model_type: str = "qwen25vl") -> Optional[Tuple[float, float]]:
     """
     Convert the first available start_box/end_box entry into absolute pixel coordinates.
     
@@ -365,19 +364,14 @@ def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_
         # UITARS 1.5 only predicts 2D coordinates (x, y)
         if model_type not in ["qwen25vl", "gta1", "uitars15"]:
             raise ValueError(f"Expected model_type='qwen25vl', got '{model_type}'")
-        if smart_resize_height is None or smart_resize_width is None:
-            raise ValueError(
-                f"smart_resize_height and smart_resize_width must be provided for model_type='qwen25vl'. "
-                f"Got smart_resize_height={smart_resize_height}, smart_resize_width={smart_resize_width}"
-            )
-        
+
         x_raw = float(coords[0])
         y_raw = float(coords[1])
         # Denormalize using the same alternating pattern as normalization
         # Index 0 (x coordinate) -> multiply by width
         # Index 1 (y coordinate) -> multiply by height
-        x = float(x_raw * smart_resize_width)
-        y = float(y_raw * smart_resize_height)
+        x = float(x_raw * img_w)
+        y = float(y_raw * img_h)
         return x, y
     except Exception:
         return None
