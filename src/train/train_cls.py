@@ -19,7 +19,7 @@ def compute_metrics(pred):
     labels = pred.label_ids
     acc     = accuracy_score(labels, preds)
     prec, rec, f1, _ = precision_recall_fscore_support(
-        labels, preds, average="binary")
+        labels, preds, average="weighted")
     return {
         "acc": acc,
         "precision": prec,

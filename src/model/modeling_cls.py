@@ -333,7 +333,7 @@ class Qwen2_5_VLForSequenceClassification(Qwen2_5_VLPreTrainedModel):
         loss: Optional[torch.Tensor] = None
         
         if labels is not None:
-            labels = labels.to(logits.device)
+            labels = labels.to(pooled_logits.device)
             if self.config.problem_type is None:
                 # automatically infer
                 if self.num_labels == 1:

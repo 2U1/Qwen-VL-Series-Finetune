@@ -65,7 +65,7 @@ class QwenCLSTrainer(Trainer):
         if self.train_dataset is None:
             raise ValueError("Trainer: training requires a train_dataset.")
 
-        sampler = self._custom_sampler if self._custom_sampler is not None else self._get_train_sampler()
+        sampler = self._custom_sampler if self._custom_sampler is not None else self._get_train_sampler
 
         return self._get_dataloader(
             dataset=self.train_dataset,
