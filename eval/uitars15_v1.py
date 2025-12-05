@@ -360,7 +360,6 @@ def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_
         if not isinstance(coords, (list, tuple)) or len(coords) < 2:
             return None
         
-        # For qwen25vl, use smart_resize denormalization logic
         # UITARS 1.5 only predicts 2D coordinates (x, y)
         if model_type not in ["qwen25vl", "gta1", "uitars15"]:
             raise ValueError(f"Expected model_type='qwen25vl', got '{model_type}'")
@@ -398,8 +397,7 @@ def _center_from_bbox(bbox: Sequence[float]) -> Optional[Tuple[float, float]]:
 def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     dx = p1[0] - p2[0]
     dy = p1[1] - p2[1]
-    return (dx * dx + dy * dy) / 2.0
-
+    return dx * dx + dy * dy
 
 def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:
     return [action.strip() for action in actions if action and action.strip()]
