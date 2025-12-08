@@ -268,10 +268,14 @@ def make_supervised_data_module(model_id, processor, data_args):
     )
     eval_dataset = None
     if data_args.eval_path is not None:
+        # Create a copy of data_args for eval dataset to use eval_image_folder if provided
+        eval_data_args = copy.deepcopy(data_args)
+        if hasattr(data_args, 'eval_image_folder') and data_args.eval_image_folder is not None:
+            eval_data_args.image_folder = data_args.eval_image_folder
         eval_dataset = SupervisedDataset(
               data_path=data_args.eval_path,
               processor=processor,
-              data_args=data_args,
+              data_args=eval_data_args,
               model_id=model_id
           )
         
