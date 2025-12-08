@@ -2,9 +2,68 @@ import json
 import os
 import sys
 import shutil
-from pathlib import Path
 import math
 from PIL import Image
+import pandas as pd
+
+GUIPERTURB_TRAINING_SAMPLE_LIST_PATH = '/mnt/disks/sca-data/filtered_gui_dataset_100k.json'
+OUTPUT_DATA_DIR = '/mnt/disks/sca-data/processed_training_data'
+OUTPUT_SCREENSHOTS_DIR = os.path.join(OUTPUT_DATA_DIR, "screenshots")
+
+def load_training_dataframe() -> pd.DataFrame:
+    """Load the training dataframe from the JSON file."""
+    return pd.read_json(GUIPERTURB_TRAINING_SAMPLE_LIST_PATH)
+
+
+def extract_path_components(screenshot_path: str) -> tuple[str, str, int]:
+    """
+    Extract run_folder, episode_id, and step_index from screenshot path.
+    Args:
+        screenshot_path: Full path to screenshot (e.g., '/mnt/disks/sca-data/all_training_splits/run_20251126_013744_train/d070774f-9ca2-43c0-a7d0-221697791cf0/screenshots/step_1_click.png')
+    Returns:
+        (run_folder, episode_id, step_index): Tuple of extracted components
+    """
+    parts = [p for p in screenshot_path.split('/') if p]  # Remove empty strings
+    filename = parts[-1]
+    
+    # Find screenshots directory index in the filepath
+    screenshots_idx = None
+    for i, part in enumerate(parts):
+        if part == 'screenshots':
+            screenshots_idx = i
+            break
+    
+    if screenshots_idx is None:
+        raise ValueError(f"Could not find 'screenshots' directory in path: {screenshot_path}")
+    
+    # episode_id is the directory before screenshots
+    episode_id = parts[screenshots_idx - 1]
+    # run_folder is the directory before episode_id
+    run_folder = parts[screenshots_idx - 2]
+    
+    # Extract step_index from filename (format: step_<index>_<action>.png)
+    step_index = int(filename.split('_')[1])
+    
+    return run_folder, episode_id, step_index
+
+
+def find_screenshot_file(screenshots_dir: str, step_index: int) -> str | None:
+    """
+    Find the screenshot file matching step_index pattern.
+    Args:
+        screenshots_dir: Directory containing screenshots
+        step_index: Step index to match
+    Returns:
+        Filename if found, None otherwise
+    """
+    if not os.path.exists(screenshots_dir):
+        return None
+    
+    pattern = f"step_{step_index}_"
+    for filename in os.listdir(screenshots_dir):
+        if filename.startswith(pattern) and filename.endswith('.png'):
+            return filename
+    return None
 
 #The following is borrwed from the UI Tars Codebase
 UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task.
@@ -116,127 +175,136 @@ def prepare_training_coordinates(original_x, original_y, original_width, origina
 
     return (training_x, training_y)
 
-def process_subdirectory(subdir_path, subdir_name, output_screenshots_dir):
-    """Process a single subdirectory containing trajectory.json and screenshots."""
-    trajectory_path = os.path.join(subdir_path, "trajectory.json")
-    screenshots_path = os.path.join(subdir_path, "screenshots")
 
-    # Check if trajectory.json exists
-    if not os.path.exists(trajectory_path):
-        print(f"  Warning: No trajectory.json found in {subdir_path}, skipping...")
+def generate_action_prediction(row: pd.Series, screenshot_path: str) -> str:
+    """
+    Generate action prediction string from row data.
+    Args:
+        row: DataFrame row with action data
+        screenshot_path: Path to screenshot for coordinate normalization
+    Returns:
+        Action prediction string
+    """
+    op = row['op'].lower()
+    type_action_value = row.get('type_action_value', '')
+    
+    if op in ['click', 'hover', 'click (fake)']:
+        # Use click_x and click_y from row, or coordinates if available
+        if 'click_x' in row and 'click_y' in row:
+            click_x, click_y = row['click_x'], row['click_y']
+        elif 'coordinates' in row and isinstance(row['coordinates'], (list, tuple)) and len(row['coordinates']) >= 2:
+            click_x, click_y = row['coordinates'][0], row['coordinates'][1]
+        else:
+            raise ValueError(f"Missing coordinates for click action in row")
+        
+        original_width, original_height = get_image_dimensions(screenshot_path)
+        normalized_coordinates = prepare_training_coordinates(click_x, click_y, original_width, original_height)
+        ground_truth_action = f"Action: click(start_box='({normalized_coordinates[0]}, {normalized_coordinates[1]})')"
+        print(f"Ground truth action: {ground_truth_action}")
+        return ground_truth_action
+    elif op == "type":
+        if type_action_value is None:
+            raise ValueError(f"Missing type_action_value for type action in row")
+        ground_truth_action = f"Action: type(content='{type_action_value}')"
+        print(f"Ground truth action: {ground_truth_action}")
+        return ground_truth_action
+    elif op == "press enter":
+        ground_truth_action = f"Action: type(content='\\n')"
+        print(f"Ground truth action: {ground_truth_action}")
+        return ground_truth_action
+    elif op == "ignore":
+        ground_truth_action = f"Action: wait()"
+        print(f"Ground truth action: {ground_truth_action}")
+        return ground_truth_action
+    else:
+        raise ValueError(f"Unknown action type: {op}")
+
+def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots_dir: str) -> dict | None:
+    """
+    Process a single row from the dataframe to create a training entry.
+    Args:
+        row: DataFrame row with sample data
+        parent_directory: Root directory containing run folders
+        output_screenshots_dir: Directory to copy screenshots to
+    Returns:
+        Training entry dict or None if processing fails
+    """
+    # Extract path components
+    screenshot_path = row['screenshot']
+    run_folder, episode_id, step_index = extract_path_components(screenshot_path)
+    
+    # Construct paths
+    episode_dir = os.path.join(parent_directory, run_folder, episode_id)
+    screenshots_dir = os.path.join(episode_dir, "screenshots")
+    
+    # Find the actual screenshot file
+    screenshot_filename = find_screenshot_file(screenshots_dir, step_index)
+    if screenshot_filename is None:
         return None
-
-    # Load trajectory data
+    
+    src_screenshot_path = os.path.join(screenshots_dir, screenshot_filename)
+    if not os.path.exists(src_screenshot_path):
+        return None
+    
+    # Copy screenshot to output directory
+    new_filename = f"{episode_id}_{screenshot_filename}"
+    dst_screenshot_path = os.path.join(output_screenshots_dir, new_filename)
+    
     try:
-        with open(trajectory_path, 'r') as f:
-            trajectory_data = json.load(f)
+        shutil.copy2(src_screenshot_path, dst_screenshot_path)
     except Exception as e:
-        print(f"  Error loading {trajectory_path}: {e}, skipping...")
+        print(f"  Warning: Failed to copy {src_screenshot_path}: {e}")
         return None
-
-    print(f"  Successfully loaded {len(trajectory_data)} items from {trajectory_path}")
-
-    # Get all screenshots in order
-    if not os.path.exists(screenshots_path):
-        print(f"  Warning: No screenshots directory found in {subdir_path}, skipping...")
+    
+    # Validate required fields
+    step_instruction = row.get('step_instruction')
+    op = row.get('op')
+    
+    if step_instruction is None or op is None:
         return None
-
-    # Get all screenshot files and sort them
-    screenshot_files = sorted([f for f in os.listdir(screenshots_path) if f.endswith('.png')], key=lambda x: int(x.split('_')[1]))
-
-    if not screenshot_files:
-        print(f"  Warning: No screenshots found in {screenshots_path}, skipping...")
+    
+    # Generate prompt and prediction
+    prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
+    
+    try:
+        prediction = generate_action_prediction(row, src_screenshot_path)
+    except Exception as e:
+        print(f"  Warning: Failed to generate action for {episode_id} step {step_index}: {e}")
         return None
-
-    # Copy screenshots to output directory with prepended subdirectory name
-    image_paths = []
-    for screenshot_file in screenshot_files:
-        src_path = os.path.join(screenshots_path, screenshot_file)
-        # Prepend subdirectory name to make filename unique
-        new_filename = f"{subdir_name}_{screenshot_file}"
-        dst_path = os.path.join(output_screenshots_dir, new_filename)
-
-        try:
-            shutil.copy2(src_path, dst_path)
-            # Store relative path from data directory
-            image_paths.append(os.path.join("screenshots", new_filename))
-        except Exception as e:
-            print(f"  Warning: Failed to copy {src_path} to {dst_path}: {e}")
-            continue
-
-    # Build conversations list with one human/gpt pair per trajectory step
-    conversations = []
-
-    image_idx = 0
-    for example in trajectory_data:
-        step_instruction = example.get("step_instruction")
-        op = example.get("op")
-        coordinates = example.get("coordinates")
-        type_action_value = example.get("type_action_value")
-
-        # Skip if any of these necessary fields is missing
-        if step_instruction is None or op is None or coordinates is None:
-            continue
-
-        prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
-
-        # Mind2Web has actions: Click, Type, Hover, Press Enter, Click (Fake) and Ignore.
-        # Map these actions to the UI Tars actions
-        prediction = ""
-        if op.lower() == "click" or op.lower() == "hover" or op.lower() == "click (fake)":
-            original_width, original_height = get_image_dimensions(os.path.join(screenshots_path, screenshot_files[image_idx]))
-            normalized_coordinates = prepare_training_coordinates(coordinates[0], coordinates[1], original_width, original_height)
-            prediction = f"Action: click(start_box='({normalized_coordinates[0]}, {normalized_coordinates[1]})')"
-        elif op.lower() == "type":
-            prediction = f"Action: type(content='{type_action_value}')'"
-        elif op.lower() == "press enter":
-            prediction = f"Action: type(content='\\n')'"
-        elif op.lower() == "ignore":
-            prediction = f"Action: wait()"
-
-        conversations.append({
-            "from": "human",
-            "value": prompt
-        })
-        conversations.append({
-            "from": "gpt",
-            "value": prediction
-        })
-        image_idx += 1
-
-    if not conversations:
-        print(f"  Warning: No valid conversations generated for {subdir_path}, skipping...")
-        return None
-
-    # Create single entry for this subdirectory
+    
+    # Create training entry
     entry = {
-        "id": subdir_name,
-        "image": image_paths,
-        "conversations": conversations
+        "id": f"{run_folder}_{episode_id}_step_{step_index}",
+        "image": [os.path.join("screenshots", new_filename)],
+        "conversations": [
+            {"from": "human", "value": prompt},
+            {"from": "gpt", "value": prediction}
+        ]
     }
-
+    
     return entry
+
 
 def main():
     # Check for command line argument
     if len(sys.argv) < 2:
-        print("Usage: python prepare_mind2web_data.py <parent_directory> [max_subdirs]")
-        print("Example: python prepare_mind2web_data.py /mnt/sca-web-data/run_20251112_004959_test_domain")
-        print("Example: python prepare_mind2web_data.py /mnt/sca-web-data/run_20251112_004959_test_domain 10")
+        print("Usage: python prepare_mind2web_data.py <parent_directory> [max_samples]")
+        print("Example: python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits")
+        print("Example: python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits 1000")
         sys.exit(1)
     
     parent_directory = sys.argv[1]
     
-    # Optional parameter to limit number of subdirectories processed
-    max_subdirs = None
+    # Optional parameter to limit number of samples processed
+    max_samples = None
     if len(sys.argv) >= 3:
         try:
-            max_subdirs = int(sys.argv[2])
-            if max_subdirs <= 0:
-                print("Error: max_subdirs must be a positive integer")
+            max_samples = int(sys.argv[2])
+            if max_samples <= 0:
+                print("Error: max_samples must be a positive integer")
                 sys.exit(1)
         except ValueError:
-            print("Error: max_subdirs must be a valid integer")
+            print("Error: max_samples must be a valid integer")
             sys.exit(1)
     
     # Validate parent directory exists
@@ -248,61 +316,95 @@ def main():
         print(f"Error: {parent_directory} is not a directory")
         sys.exit(1)
     
-    print(f"Processing subdirectories in: {parent_directory}")
+    # Load training dataframe
+    print("Loading training dataframe...")
+    df = load_training_dataframe()
+    print(f"Loaded {len(df)} samples from dataframe")
     
-    # Get all subdirectories
-    subdirectories = [d for d in os.listdir(parent_directory) 
-                     if os.path.isdir(os.path.join(parent_directory, d))]
+    # Shuffle dataframe to randomize order (avoid episode-based ordering)
+    print("Shuffling dataframe...")
+    df = df.sample(frac=1, random_state=None).reset_index(drop=True)
+    print("Dataframe shuffled")
     
-    if not subdirectories:
-        print(f"Error: No subdirectories found in {parent_directory}")
-        sys.exit(1)
-    
-    # Limit subdirectories if max_subdirs is specified
-    if max_subdirs is not None:
-        subdirectories = subdirectories[:max_subdirs]
-        print(f"Found {len(subdirectories)} subdirectories to process (limited to {max_subdirs})")
-    else:
-        print(f"Found {len(subdirectories)} subdirectories to process")
+    # Limit samples if max_samples is specified
+    if max_samples is not None:
+        df = df.head(max_samples)
+        print(f"Limited to {max_samples} samples")
     
     # Create output directories
-    current_dir = os.getcwd()
-    output_data_dir = os.path.join(current_dir, "data")
-    output_screenshots_dir = os.path.join(output_data_dir, "screenshots")
+    os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_SCREENSHOTS_DIR, exist_ok=True)
+    output_file_path = os.path.join(OUTPUT_DATA_DIR, "training_data.json")
+
+    print(f"\nOutput directory: {OUTPUT_DATA_DIR}")
+    print(f"Screenshots will be copied to: {OUTPUT_SCREENSHOTS_DIR}")
+    print(f"Training data will be saved to: {output_file_path}")
     
-    # Create directories if they don't exist
-    os.makedirs(output_data_dir, exist_ok=True)
-    os.makedirs(output_screenshots_dir, exist_ok=True)
-    print(f"\nOutput directory: {output_data_dir}")
-    print(f"Screenshots will be copied to: {output_screenshots_dir}")
-    
-    # Process each subdirectory
+    # Load existing training data if it exists
     all_training_data = []
+    existing_entry_ids = set()
     
-    for subdir_name in sorted(subdirectories):
-        subdir_path = os.path.join(parent_directory, subdir_name)
-        print(f"\nProcessing: {subdir_name}")
+    if os.path.exists(output_file_path):
+        try:
+            with open(output_file_path, 'r') as f:
+                all_training_data = json.load(f)
+            existing_entry_ids = {entry['id'] for entry in all_training_data}
+            print(f"Loaded {len(all_training_data)} existing entries from {output_file_path}")
+        except Exception as e:
+            print(f"Warning: Failed to load existing training data: {e}. Starting fresh.")
+            all_training_data = []
+            existing_entry_ids = set()
+    
+    # Process each row in dataframe
+    processed_count = 0
+    skipped_count = 0
+    already_exists_count = 0
+    
+    print(f"\nProcessing {len(df)} samples...")
+    for idx, row in df.iterrows():
+        # Extract entry ID to check if already processed
+        screenshot_path = row['screenshot']
+        run_folder, episode_id, step_index = extract_path_components(screenshot_path)
+        entry_id = f"{run_folder}_{episode_id}_step_{step_index}"
         
-        entry = process_subdirectory(subdir_path, subdir_name, output_screenshots_dir)
+        # Skip if already processed
+        if entry_id in existing_entry_ids:
+            already_exists_count += 1
+            if (idx + 1) % 1000 == 0:
+                print(f"  Processed {idx + 1}/{len(df)} samples (skipped {already_exists_count} existing)...")
+            continue
+        
+        print(f"Processing sample {idx + 1}/{len(df)}: {entry_id}")
+        # Process the row
+        entry = process_sample_row(row, parent_directory, OUTPUT_SCREENSHOTS_DIR)
         
         if entry is not None:
             all_training_data.append(entry)
-            print(f"  Added training entry with {len(entry['conversations'])//2} steps and {len(entry['image'])} images from {subdir_name}")
+            existing_entry_ids.add(entry_id)  # Add to set to avoid duplicates
+            processed_count += 1
+            
+            # Save incrementally after each successful processing
+            try:
+                with open(output_file_path, 'w') as f:
+                    json.dump(all_training_data, f, indent=4)
+            except Exception as e:
+                print(f"  Warning: Failed to save incrementally: {e}")
+            
+            if (idx + 1) % 100 == 0:
+                print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
         else:
-            print(f"  Skipped {subdir_name} due to errors or missing data")
+            skipped_count += 1
+            if (idx + 1) % 1000 == 0:
+                print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
     
     print(f"\n{'='*60}")
-    print(f"Total training examples collected: {len(all_training_data)}")
+    print(f"Total training examples: {len(all_training_data)}")
+    print(f"Newly processed: {processed_count}")
+    print(f"Already existed: {already_exists_count}")
+    print(f"Skipped (failed): {skipped_count}")
     
-    # Define output path in the data directory
-    output_file_path = os.path.join(output_data_dir, "training_data.json")
-    
-    # Write the training_data to the JSON file
-    with open(output_file_path, 'w') as f:
-        json.dump(all_training_data, f, indent=4)
-    
-    print(f"Successfully wrote training data to {output_file_path}")
-    print(f"Copied {sum(len(entry['image']) for entry in all_training_data)} screenshots to {output_screenshots_dir}")
+    print(f"\nSuccessfully wrote training data to {output_file_path}")
+    print(f"Total screenshots in output directory: {len(all_training_data)}")
 
 
 if __name__ == "__main__":
