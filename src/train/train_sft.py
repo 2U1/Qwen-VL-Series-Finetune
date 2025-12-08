@@ -233,6 +233,12 @@ def train():
         **data_module
     )
 
+    # Run initial evaluation before training starts (baseline metrics)
+    if data_module.get("eval_dataset") is not None:
+        rank0_print("Running initial evaluation before training...")
+        initial_eval_metrics = trainer.evaluate()
+        rank0_print(f"Initial evaluation metrics: {initial_eval_metrics}")
+
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)
     else:
