@@ -2,7 +2,7 @@ import os
 import torch
 from peft import LoraConfig, get_peft_model
 import ast
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration, AutoModelForVision2Seq
+from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
 from src.trainer import QwenSFTTrainer
 from src.dataset import make_supervised_data_module
 from src.params import DataArguments, ModelArguments, TrainingArguments
@@ -77,7 +77,7 @@ def train():
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     use_liger = training_args.use_liger
-    if "Qwen2.5" or "UI-TARS" in model_args.model_id:
+    if "Qwen2.5" in model_args.model_id or "UI-TARS" in model_args.model_id:
         # monkey patch the vision model
         replace_qwen2_5_vision()
         # It monkey patches the forward to handle mixed modality inputs.
@@ -133,18 +133,12 @@ def train():
             )
         ))
 
-    if "Qwen2.5" in model_args.model_id:
+    if "Qwen2.5" in model_args.model_id or "UI-TARS" in model_args.model_id:
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
             dtype=compute_dtype,
             attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
             **bnb_model_from_pretrained_args
-        )
-    elif "UI-TARS" in model_args.model_id:
-        model = AutoModelForVision2Seq.from_pretrained(
-            model_args.model_id,
-            dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
         )
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(
