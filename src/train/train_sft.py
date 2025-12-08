@@ -159,12 +159,13 @@ def train():
         k_vis=getattr(training_args, "unfreeze_topk_vision", 0),
     )
 
-    # Configure gradient checkpointing kwargs (but don't enable yet - do it after LoRA)
     if training_args.gradient_checkpointing:
         if training_args.vision_lora:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
         else:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
+
+        model.enable_input_require_grads()
 
     if training_args.bits in [4,8]:
         model.config.dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
@@ -202,28 +203,6 @@ def train():
             for name, param in model.named_parameters():
                 if "merger" in name:
                     param.requires_grad = True
-        
-        # Verify LoRA parameters are trainable (critical for DeepSpeed)
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        trainable_count = sum(p.numel() for p in trainable_params)
-        rank0_print(f"Trainable parameters: {trainable_count:,}")
-        if trainable_count == 0:
-            raise ValueError(
-                "ERROR: No trainable parameters found! LoRA adapters should have requires_grad=True. "
-                "This will cause DeepSpeed initialization to fail."
-            )
-        
-        # Ensure LoRA adapter parameters are explicitly marked as trainable
-        # Sometimes PEFT models need this to be explicit for DeepSpeed
-        for name, param in model.named_parameters():
-            if "lora" in name.lower() and not param.requires_grad:
-                param.requires_grad = True
-                rank0_print(f"Explicitly enabled gradients for: {name}")
-    
-    # Enable input require grads for gradient checkpointing (needed for both LoRA and non-LoRA training)
-    # Call this after all model modifications (LoRA, etc.) are complete
-    if training_args.gradient_checkpointing:
-        model.enable_input_require_grads()
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
 
