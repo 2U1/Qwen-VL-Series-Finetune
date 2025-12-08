@@ -219,10 +219,11 @@ def train():
             if "lora" in name.lower() and not param.requires_grad:
                 param.requires_grad = True
                 rank0_print(f"Explicitly enabled gradients for: {name}")
-        
-        # Re-enable input require grads AFTER LoRA is added (critical for gradient checkpointing + DeepSpeed)
-        if training_args.gradient_checkpointing:
-            model.enable_input_require_grads()
+    
+    # Enable input require grads for gradient checkpointing (needed for both LoRA and non-LoRA training)
+    # Call this after all model modifications (LoRA, etc.) are complete
+    if training_args.gradient_checkpointing:
+        model.enable_input_require_grads()
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
 

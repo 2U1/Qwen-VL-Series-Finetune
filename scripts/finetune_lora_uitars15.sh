@@ -15,7 +15,7 @@ SETUP="${SETUP:-A100}"  # Default to A100, override with: SETUP=L4 bash script.s
 if [ "$SETUP" == "A100" ]; then
     # A100 Single GPU Configuration
     NUM_DEVICES=1
-    BATCH_PER_DEVICE=4
+    BATCH_PER_DEVICE=16
     GLOBAL_BATCH_SIZE=128
     GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
     DEEPSPEED_CONFIG="scripts/zero3_offload.json"
@@ -62,9 +62,15 @@ if [ -n "$EVAL_PATH" ]; then
     if [ -n "$EVAL_IMAGE_FOLDER" ]; then
         EVAL_ARGS="$EVAL_ARGS --eval_image_folder $EVAL_IMAGE_FOLDER"
     fi
-    # Increase eval batch size for faster evaluation (you have ~40GB free GPU memory)
-    # Using 4x training batch size for eval (can go higher if needed)
-    EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-$((BATCH_PER_DEVICE * 4))}"
+    # Eval batch size: Use smaller than training to avoid OOM
+    # During eval, model needs memory for forward pass + activations (no gradient checkpointing)
+    # ZeRO-3 offload still brings parameters to GPU during forward pass
+    # Default to half of training batch size, can override: EVAL_BATCH_SIZE=8 bash script.sh
+    EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-$((BATCH_PER_DEVICE / 2))}"
+    # Ensure minimum of 1
+    if [ "$EVAL_BATCH_SIZE" -lt 1 ]; then
+        EVAL_BATCH_SIZE=1
+    fi
     EVAL_ARGS="$EVAL_ARGS --eval_strategy epoch --per_device_eval_batch_size $EVAL_BATCH_SIZE"
 fi
 
