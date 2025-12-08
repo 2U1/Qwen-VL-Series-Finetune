@@ -159,13 +159,12 @@ def train():
         k_vis=getattr(training_args, "unfreeze_topk_vision", 0),
     )
 
+    # Configure gradient checkpointing kwargs (but don't enable yet - do it after LoRA)
     if training_args.gradient_checkpointing:
         if training_args.vision_lora:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
         else:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
-        
-        model.enable_input_require_grads()
 
     if training_args.bits in [4,8]:
         model.config.dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
@@ -203,6 +202,27 @@ def train():
             for name, param in model.named_parameters():
                 if "merger" in name:
                     param.requires_grad = True
+        
+        # Verify LoRA parameters are trainable (critical for DeepSpeed)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        trainable_count = sum(p.numel() for p in trainable_params)
+        rank0_print(f"Trainable parameters: {trainable_count:,}")
+        if trainable_count == 0:
+            raise ValueError(
+                "ERROR: No trainable parameters found! LoRA adapters should have requires_grad=True. "
+                "This will cause DeepSpeed initialization to fail."
+            )
+        
+        # Ensure LoRA adapter parameters are explicitly marked as trainable
+        # Sometimes PEFT models need this to be explicit for DeepSpeed
+        for name, param in model.named_parameters():
+            if "lora" in name.lower() and not param.requires_grad:
+                param.requires_grad = True
+                rank0_print(f"Explicitly enabled gradients for: {name}")
+        
+        # Re-enable input require grads AFTER LoRA is added (critical for gradient checkpointing + DeepSpeed)
+        if training_args.gradient_checkpointing:
+            model.enable_input_require_grads()
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
 
@@ -234,10 +254,16 @@ def train():
     )
 
     # Run initial evaluation before training starts (baseline metrics)
-    if data_module.get("eval_dataset") is not None:
+    # Skip if SKIP_INITIAL_EVAL env var is set or if resuming from checkpoint
+    skip_initial_eval = os.getenv("SKIP_INITIAL_EVAL", "false").lower() == "true"
+    has_checkpoint = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    
+    if data_module.get("eval_dataset") is not None and not skip_initial_eval and not has_checkpoint:
         rank0_print("Running initial evaluation before training...")
         initial_eval_metrics = trainer.evaluate()
         rank0_print(f"Initial evaluation metrics: {initial_eval_metrics}")
+    elif skip_initial_eval:
+        rank0_print("Skipping initial evaluation (SKIP_INITIAL_EVAL=true)")
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

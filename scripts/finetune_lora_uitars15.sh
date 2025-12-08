@@ -62,7 +62,10 @@ if [ -n "$EVAL_PATH" ]; then
     if [ -n "$EVAL_IMAGE_FOLDER" ]; then
         EVAL_ARGS="$EVAL_ARGS --eval_image_folder $EVAL_IMAGE_FOLDER"
     fi
-    EVAL_ARGS="$EVAL_ARGS --eval_strategy epoch --per_device_eval_batch_size $((BATCH_PER_DEVICE * 2))"
+    # Increase eval batch size for faster evaluation (you have ~40GB free GPU memory)
+    # Using 4x training batch size for eval (can go higher if needed)
+    EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-$((BATCH_PER_DEVICE * 4))}"
+    EVAL_ARGS="$EVAL_ARGS --eval_strategy epoch --per_device_eval_batch_size $EVAL_BATCH_SIZE"
 fi
 
 deepspeed src/train/train_sft.py \
@@ -106,4 +109,5 @@ deepspeed src/train/train_sft.py \
     --save_strategy "steps" \
     --save_steps 200 \
     --save_total_limit 10 \
-    --dataloader_num_workers 4
+    --dataloader_num_workers 8 \
+    --dataloader_pin_memory True
