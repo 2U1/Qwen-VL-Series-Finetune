@@ -43,11 +43,9 @@ else
     GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
     DEEPSPEED_CONFIG="scripts/zero3_offload.json"
     
-    DATA_PATH="${DATA_PATH:-src/data/training_data.json}"
-    IMAGE_FOLDER="${IMAGE_FOLDER:-src/data}"
-    EVAL_PATH="${EVAL_PATH:-}"  # Optional for L4 test
-    EVAL_IMAGE_FOLDER="${EVAL_IMAGE_FOLDER:-}"
-    OUTPUT_DIR="${OUTPUT_DIR:-output/testing_lora}"
+    DATA_PATH="src/data/training_data.json"
+    IMAGE_FOLDER="src/data"
+    OUTPUT_DIR="output/testing_lora"
     
     NUM_EPOCHS=3
     LOGGING_STEPS=1
@@ -93,7 +91,7 @@ deepspeed src/train/train_sft.py \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --image_min_pixels $((256 * 28 * 28)) \
-    --image_max_pixels $((1280 * 28 * 28)) \
+    --image_max_pixels $((16384 * 28 * 28)) \
     --learning_rate 1e-4 \
     --merger_lr 1e-5 \
     --vision_lr 2e-6 \

@@ -8,7 +8,64 @@ import pandas as pd
 
 GUIPERTURB_TRAINING_SAMPLE_LIST_PATH = '/mnt/disks/sca-data/filtered_gui_dataset_100k.json'
 OUTPUT_DATA_DIR = '/mnt/disks/sca-data/processed_training_data'
-OUTPUT_SCREENSHOTS_DIR = os.path.join(OUTPUT_DATA_DIR, "screenshots")
+
+def filter_style_variant(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter dataframe for style variant: run folders ending with *_style or *_train."""
+    def is_style_run_folder(screenshot_path: str) -> bool:
+        try:
+            run_folder, _, _ = extract_path_components(screenshot_path)
+            return run_folder.endswith('_style') or run_folder.endswith('_train')
+        except:
+            return False
+    
+    mask = df['screenshot'].apply(is_style_run_folder)
+    return df[mask].reset_index(drop=True)
+
+
+def filter_text_shrink_zoom_variant(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter dataframe for text_shrink/zoom variant: run folders ending with *_text_shrink or *_precision."""
+    def is_text_shrink_zoom_run_folder(screenshot_path: str) -> bool:
+        try:
+            run_folder, _, _ = extract_path_components(screenshot_path)
+            return run_folder.endswith('_text_shrink') or run_folder.endswith('_precision')
+        except:
+            return False
+    
+    mask = df['screenshot'].apply(is_text_shrink_zoom_run_folder)
+    return df[mask].reset_index(drop=True)
+
+
+def create_balanced_val_set(df: pd.DataFrame, val_ratio: float = 0.1, random_state: int = 42) -> pd.DataFrame:
+    """
+    Create a balanced validation set by randomly selecting samples evenly from each run folder.
+    Args:
+        df: Input dataframe
+        val_ratio: Ratio of samples to select for validation (default 0.1 = 10%)
+        random_state: Random seed for reproducibility
+    Returns:
+        Filtered dataframe with balanced validation samples
+    """
+    # Extract run folders from screenshot paths
+    def get_run_folder(screenshot_path: str) -> str:
+        try:
+            run_folder, _, _ = extract_path_components(screenshot_path)
+            return run_folder
+        except:
+            return None
+    
+    df_with_run_folder = df.copy()
+    df_with_run_folder['run_folder'] = df_with_run_folder['screenshot'].apply(get_run_folder)
+    
+    # Group by run folder
+    val_samples = []
+    for run_folder, group in df_with_run_folder.groupby('run_folder'):
+        n_samples = max(1, int(len(group) * val_ratio))
+        val_group = group.sample(n=n_samples, random_state=random_state)
+        val_samples.append(val_group)
+    
+    val_df = pd.concat(val_samples, ignore_index=True)
+    return val_df.drop(columns=['run_folder']).reset_index(drop=True)
+
 
 def load_training_dataframe() -> pd.DataFrame:
     """Load the training dataframe from the JSON file."""
@@ -251,7 +308,7 @@ def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots
     dst_screenshot_path = os.path.join(output_screenshots_dir, new_filename)
     
     try:
-        shutil.copy2(src_screenshot_path, dst_screenshot_path)
+        shutil.copy(src_screenshot_path, dst_screenshot_path)  # Use copy() instead of copy2() - faster, no metadata needed
     except Exception as e:
         print(f"  Warning: Failed to copy {src_screenshot_path}: {e}")
         return None
@@ -286,26 +343,50 @@ def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots
 
 
 def main():
-    # Check for command line argument
+    # Check for command line arguments
     if len(sys.argv) < 2:
-        print("Usage: python prepare_mind2web_data.py <parent_directory> [max_samples]")
-        print("Example: python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits")
-        print("Example: python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits 1000")
+        print("Usage: python prepare_mind2web_data.py <parent_directory> [variant] [max_samples]")
+        print("Variants:")
+        print("  (default) - All samples")
+        print("  style - Style variant (run folders ending with *_style or *_train)")
+        print("  text_shrink_zoom - Text shrink/zoom variant (run folders ending with *_text_shrink or *_precision)")
+        print("  val - Balanced validation set (10% evenly from each run folder)")
+        print("\nExamples:")
+        print("  python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits")
+        print("  python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits style")
+        print("  python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits val 1000")
         sys.exit(1)
     
     parent_directory = sys.argv[1]
     
-    # Optional parameter to limit number of samples processed
+    # Parse variant (optional)
+    variant = None
     max_samples = None
+    
     if len(sys.argv) >= 3:
-        try:
-            max_samples = int(sys.argv[2])
-            if max_samples <= 0:
-                print("Error: max_samples must be a positive integer")
+        arg2 = sys.argv[2]
+        if arg2 in ['style', 'text_shrink_zoom', 'val', 'all']:
+            variant = arg2
+            # Check for max_samples as 3rd argument
+            if len(sys.argv) >= 4:
+                try:
+                    max_samples = int(sys.argv[3])
+                    if max_samples <= 0:
+                        print("Error: max_samples must be a positive integer")
+                        sys.exit(1)
+                except ValueError:
+                    print("Error: max_samples must be a valid integer")
+                    sys.exit(1)
+        else:
+            # Assume it's max_samples (backward compatibility)
+            try:
+                max_samples = int(arg2)
+                if max_samples <= 0:
+                    print("Error: max_samples must be a positive integer")
+                    sys.exit(1)
+            except ValueError:
+                print(f"Error: Unknown variant '{arg2}'. Must be 'style', 'text_shrink_zoom', 'val', or 'all'")
                 sys.exit(1)
-        except ValueError:
-            print("Error: max_samples must be a valid integer")
-            sys.exit(1)
     
     # Validate parent directory exists
     if not os.path.exists(parent_directory):
@@ -321,6 +402,22 @@ def main():
     df = load_training_dataframe()
     print(f"Loaded {len(df)} samples from dataframe")
     
+    # Apply variant filtering
+    if variant == 'style':
+        print("\nFiltering for style variant (run folders ending with *_style or *_train)...")
+        df = filter_style_variant(df)
+        print(f"Filtered to {len(df)} samples for style variant")
+    elif variant == 'text_shrink_zoom':
+        print("\nFiltering for text_shrink/zoom variant (run folders ending with *_text_shrink or *_precision)...")
+        df = filter_text_shrink_zoom_variant(df)
+        print(f"Filtered to {len(df)} samples for text_shrink/zoom variant")
+    elif variant == 'val':
+        print("\nCreating balanced validation set (10% evenly from each run folder)...")
+        df = create_balanced_val_set(df, val_ratio=0.1, random_state=42)
+        print(f"Created validation set with {len(df)} samples")
+    elif variant == 'all':
+        print("\nNo filtering for all variant")
+    
     # Shuffle dataframe to randomize order (avoid episode-based ordering)
     print("Shuffling dataframe...")
     df = df.sample(frac=1, random_state=None).reset_index(drop=True)
@@ -331,13 +428,20 @@ def main():
         df = df.head(max_samples)
         print(f"Limited to {max_samples} samples")
     
-    # Create output directories
-    os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
-    os.makedirs(OUTPUT_SCREENSHOTS_DIR, exist_ok=True)
-    output_file_path = os.path.join(OUTPUT_DATA_DIR, "training_data.json")
+    # Determine output paths based on variant
+    if variant:
+        output_data_dir = os.path.join(OUTPUT_DATA_DIR, variant)
+        output_screenshots_dir = os.path.join(output_data_dir, "screenshots")
+        output_file_path = os.path.join(output_data_dir, f"{variant}_data.json")
+    else:
+        raise ValueError("Variant is required")
 
-    print(f"\nOutput directory: {OUTPUT_DATA_DIR}")
-    print(f"Screenshots will be copied to: {OUTPUT_SCREENSHOTS_DIR}")
+    # Create output directories
+    os.makedirs(output_data_dir, exist_ok=True)
+    os.makedirs(output_screenshots_dir, exist_ok=True)
+
+    print(f"\nOutput directory: {output_data_dir}")
+    print(f"Screenshots will be copied to: {output_screenshots_dir}")
     print(f"Training data will be saved to: {output_file_path}")
     
     # Load existing training data if it exists
@@ -375,20 +479,21 @@ def main():
             continue
         
         print(f"Processing sample {idx + 1}/{len(df)}: {entry_id}")
-        # Process the row
-        entry = process_sample_row(row, parent_directory, OUTPUT_SCREENSHOTS_DIR)
+        # Process the row (will overwrite image if it exists to prevent corruption)
+        entry = process_sample_row(row, parent_directory, output_screenshots_dir)
         
         if entry is not None:
             all_training_data.append(entry)
             existing_entry_ids.add(entry_id)  # Add to set to avoid duplicates
             processed_count += 1
             
-            # Save incrementally after each successful processing
-            try:
-                with open(output_file_path, 'w') as f:
-                    json.dump(all_training_data, f, indent=4)
-            except Exception as e:
-                print(f"  Warning: Failed to save incrementally: {e}")
+            # Save incrementally every 100 files (much faster than saving after each file)
+            if processed_count % 100 == 0:
+                try:
+                    with open(output_file_path, 'w') as f:
+                        json.dump(all_training_data, f, indent=4)
+                except Exception as e:
+                    print(f"  Warning: Failed to save incrementally: {e}")
             
             if (idx + 1) % 100 == 0:
                 print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
@@ -396,6 +501,13 @@ def main():
             skipped_count += 1
             if (idx + 1) % 1000 == 0:
                 print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
+    
+    # Final save to ensure all data is written
+    try:
+        with open(output_file_path, 'w') as f:
+            json.dump(all_training_data, f, indent=4)
+    except Exception as e:
+        print(f"  Warning: Failed to save final training data: {e}")
     
     print(f"\n{'='*60}")
     print(f"Total training examples: {len(all_training_data)}")
