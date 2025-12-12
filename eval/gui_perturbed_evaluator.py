@@ -8,8 +8,6 @@ import argparse
 import json
 import os
 import sys
-import math
-import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,11 +25,9 @@ eval_dir = Path(__file__).parent
 sys.path.insert(0, str(eval_dir))
 
 from prompts import (
-    UITARS_ACTION_SPACE,
-    UITARS_USR_PROMPT_THOUGHT,
-    UITARS_USR_PROMPT_NOTHOUGHT,
-    GTA1_SYSTEM_PROMPT,
-    render_qwen25_tools_system,
+    build_gta1_messages,
+    build_uitars15_messages,
+    build_qwen25vl_messages,
 )
 
 
@@ -48,40 +44,6 @@ MAX_PIXELS = 16384 * 28 * 28
 MAX_RATIO = 200
 
 VALID_MODEL_TYPES = {"gta1", "qwen25vl", "uitars15"}
-
-try:
-    from qwen_vl_utils import smart_resize
-except ImportError:
-    # Fallback implementation when qwen_vl_utils is not available
-    def _round_by_factor(number: int, factor: int) -> int:
-        """Returns the closest integer to 'number' that is divisible by 'factor'."""
-        return round(number / factor) * factor
-
-    def _ceil_by_factor(number: int, factor: int) -> int:
-        """Returns the smallest integer >= 'number' that is divisible by 'factor'."""
-        return math.ceil(number / factor) * factor
-
-    def _floor_by_factor(number: int, factor: int) -> int:
-        """Returns the largest integer <= 'number' that is divisible by 'factor'."""
-        return math.floor(number / factor) * factor
-
-    def smart_resize(height: int, width: int, factor: int = IMAGE_FACTOR, 
-                    min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS) -> Tuple[int, int]:
-        """Rescale image dimensions to meet constraints."""
-        if max(height, width) / min(height, width) > MAX_RATIO:
-            raise ValueError(f"Aspect ratio must be < {MAX_RATIO}")
-        h_bar = max(factor, _round_by_factor(height, factor))
-        w_bar = max(factor, _round_by_factor(width, factor))
-        if h_bar * w_bar > max_pixels:
-            beta = math.sqrt((height * width) / max_pixels)
-            h_bar = _floor_by_factor(height / beta, factor)
-            w_bar = _floor_by_factor(width / beta, factor)
-        elif h_bar * w_bar < min_pixels:
-            beta = math.sqrt(min_pixels / (height * width))
-            h_bar = _ceil_by_factor(height * beta, factor)
-            w_bar = _ceil_by_factor(width * beta, factor)
-        return h_bar, w_bar
-
 
 # ============================================================================
 # Configuration
@@ -251,25 +213,9 @@ class ModelClient:
         # Load and process image
         metadata = metadata or {}
         image = self._load_image(image_path, **metadata)
-        image_base64 = self._encode_image(image)
-        
-        # Get prompts
-        system_text, user_text = self._get_prompts(instruction, image)
         
         # Build messages
-        messages = [
-            {"role": "system", "content": [{"type": "text", "text": system_text}]},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
-                    },
-                ],
-            },
-        ]
+        messages = self.build_messages(instruction, image, self.config.model_type, self.config.use_reasoning)
         
         # Make API request
         request_kwargs = {
@@ -284,6 +230,20 @@ class ModelClient:
         
         response = self.client.chat.completions.create(**request_kwargs)
         return response.choices[0].message.content.strip()
+
+    def build_messages(self, instruction: str, image: Image.Image, model_type: str, use_reasoning: bool) -> List[Dict[str, Any]]:
+        """Build messages for model inference."""
+        # Get resized image dimensions
+        resized_width, resized_height = image.size
+        
+        if model_type == "gta1":
+            return build_gta1_messages(resized_height, resized_width, instruction, image, use_reasoning)
+        elif model_type == "uitars15":
+            return build_uitars15_messages(instruction, image, use_reasoning)
+        elif model_type == "qwen25vl":
+            return build_qwen25vl_messages(instruction, image, resized_width, resized_height, use_reasoning)
+        else:
+            raise ValueError(f"Invalid model type: {model_type}")
     
     def _load_image(self, image_path: Path, 
                     task_id: Optional[str] = None, 
@@ -317,94 +277,9 @@ class ModelClient:
                 f"[Image Dimension Check] Image is not {EXPECTED_IMAGE_WIDTH}x{EXPECTED_IMAGE_HEIGHT}: "
                 f"actual={original_width}x{original_height}{metadata_str} path={image_path}"
             )
-        
-        # Apply smart resize
-        resized_height, resized_width = smart_resize(
-            original_height,
-            original_width,
-            factor=self.config.image_factor,
-            min_pixels=self.config.image_min_pixels,
-            max_pixels=self.config.image_max_pixels,
-        )
-        
-        # Resize the image
-        resized_image = image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
-        
-        logger.debug(f"[Image] Original size: {original_width}x{original_height}")
-        logger.debug(f"[Image] Resized size: {resized_width}x{resized_height}")
-        
-        return resized_image
-    
-    def _encode_image(self, image: Image.Image) -> str:
-        """Encode image to base64."""
-        buffer = BytesIO()
-        image.save(buffer, format="PNG")
-        return base64.b64encode(buffer.getvalue()).decode("utf-8")
-    
-    def _get_prompts(self, instruction: str, image: Image.Image) -> Tuple[str, str]:
-        """
-        Get system and user prompts based on model config.
-        
-        Prompt selection logic:
-        - gta1: Uses GTA1_SYSTEM_PROMPT (use_reasoning is ignored)
-        - qwen25vl: Uses UITARS prompts (controlled by use_reasoning)
-        - uitars15: Uses UITARS prompts (controlled by use_reasoning)
-        
-        Returns:
-            (system_prompt, user_prompt)
-        """
-        model_type = self.config.model_type.lower().strip()
-        img_w, img_h = image.size
-        
-        # Log model_type for debugging
-        logger.debug(f"[Prompt] Config model_type: '{self.config.model_type}', normalized: '{model_type}'")
-        
-        # GTA1 model - use resized dimensions for system prompt
-        if model_type == "gta1":
-            system_text = GTA1_SYSTEM_PROMPT.format(height=img_h, width=img_w)
-            user_text = instruction
-            self._log_prompt_selection("GTA1_SYSTEM_PROMPT", model_type, system_text, user_text, 
-                                     use_reasoning_ignored=True)
-            return system_text, user_text
-        
-        # UITARS prompts for qwen25vl and uitars15
-        if model_type in ("qwen25vl", "uitars15"):
-            if self.config.use_reasoning:
-                template_name = "UITARS_USR_PROMPT_THOUGHT"
-                user_text = UITARS_USR_PROMPT_THOUGHT.format(
-                    action_space=UITARS_ACTION_SPACE,
-                    language=self.config.language,
-                    instruction=instruction,
-                )
-            else:
-                template_name = "UITARS_USR_PROMPT_NOTHOUGHT"
-                user_text = UITARS_USR_PROMPT_NOTHOUGHT.format(
-                    action_space=UITARS_ACTION_SPACE,
-                    instruction=instruction,
-                )
-            system_text = "You are a helpful assistant."
-            self._log_prompt_selection(template_name, model_type, system_text, user_text)
-            return system_text, user_text
-        
-        # Default fallback - should not happen with valid presets
-        logger.error(
-            f"[Prompt] Unknown model type: '{model_type}' (from config.model_type='{self.config.model_type}'). "
-            f"Using default fallback. Valid types: {VALID_MODEL_TYPES}"
-        )
-        system_text = "You are a helpful assistant."
-        user_text = instruction
-        self._log_prompt_selection("DEFAULT", model_type, system_text, user_text)
-        return system_text, user_text
-    
-    def _log_prompt_selection(self, template_name: str, model_type: str, 
-                              system_text: str, user_text: str, 
-                              use_reasoning_ignored: bool = False):
-        """Log prompt selection details."""
-        reasoning_info = "(ignored for GTA1)" if use_reasoning_ignored else f"use_reasoning={self.config.use_reasoning}"
-        logger.debug(f"[Prompt] Using template: {template_name}")
-        logger.debug(f"[Prompt] Model type: {model_type}, {reasoning_info}")
-        logger.debug(f"[Prompt] System prompt: {system_text[:200]}...")
-        logger.debug(f"[Prompt] User prompt (first 200 chars): {user_text[:200]}...")
+
+        return image
+
 
 
 # ============================================================================
@@ -501,6 +376,10 @@ class Evaluator:
         }
         
         raw_prediction = self.model_client.predict(instruction, image_path, metadata=metadata)
+        logger.info(f"Instruction: {instruction}")
+        logger.info(f"Image path: {image_path}")
+        logger.info(f"Raw prediction: {raw_prediction}")
+        logger.info(f"Ground truth bbox: {row['gt_bbox']}")
         
         return {
             "task_id": row["task_id"],
