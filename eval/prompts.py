@@ -186,6 +186,7 @@ QWEN25_SYSTEM_PROMPT_THOUGHT = (
 
 def build_gta1_messages(height: int, width: int, instruction: str, image: Image.Image, use_reasoning: bool) -> List[Dict[str, Any]]:
     resized_image = resize_image(image)
+    encoded_resized_image = convert_pil_image_to_base64(resized_image)
     
     # Select appropriate prompt template
     if use_reasoning:
@@ -201,7 +202,7 @@ def build_gta1_messages(height: int, width: int, instruction: str, image: Image.
     user_message = {
         "role": "user",
         "content": [
-            {"type": "image", "image": resized_image},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_resized_image}"}},
             {"type": "text", "text": instruction}
         ]
     }
