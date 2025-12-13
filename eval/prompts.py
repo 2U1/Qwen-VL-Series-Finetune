@@ -184,15 +184,15 @@ QWEN25_SYSTEM_PROMPT_THOUGHT = (
 # Build Messages
 # ============================================================================
 
-def build_gta1_messages(height: int, width: int, instruction: str, image: Image.Image, use_reasoning: bool) -> List[Dict[str, Any]]:
+def build_gta1_messages(instruction: str, image: Image.Image, use_reasoning: bool) -> List[Dict[str, Any]]:
     resized_image = resize_image(image)
     encoded_resized_image = convert_pil_image_to_base64(resized_image)
     
     # Select appropriate prompt template
     if use_reasoning:
-        system_prompt = GTA1_SYSTEM_PROMPT_THOUGHT.format(height=height, width=width)
+        system_prompt = GTA1_SYSTEM_PROMPT_THOUGHT.format(height=image.height, width=image.width)
     else:
-        system_prompt = GTA1_SYSTEM_PROMPT.format(height=height, width=width)
+        system_prompt = GTA1_SYSTEM_PROMPT.format(height=image.height, width=image.width)
     
     system_message = {
         "role": "system",
@@ -236,7 +236,7 @@ def build_uitars15_messages(instruction: str, image: Image.Image, use_reasoning:
     return messages
 
 
-def build_qwen25vl_messages(instruction: str, image: Image.Image, screen_width: int, screen_height: int, use_reasoning: bool) -> List[Dict[str, Any]]:
+def build_qwen25vl_messages(instruction: str, image: Image.Image, use_reasoning: bool) -> List[Dict[str, Any]]:
     """
     Build messages for Qwen2.5VL following the official example format.
     
@@ -256,9 +256,9 @@ def build_qwen25vl_messages(instruction: str, image: Image.Image, screen_width: 
     
     # Select appropriate prompt template
     if use_reasoning:
-        prompt_template = QWEN25_SYSTEM_PROMPT_THOUGHT.replace("{screen_width}", str(screen_width)).replace("{screen_height}", str(screen_height))
+        prompt_template = QWEN25_SYSTEM_PROMPT_THOUGHT.replace("{screen_width}", str(resized_image.width)).replace("{screen_height}", str(resized_image.height))
     else:
-        prompt_template = QWEN25_SYSTEM_PROMPT_NOTHOUGHT.replace("{screen_width}", str(screen_width)).replace("{screen_height}", str(screen_height))
+        prompt_template = QWEN25_SYSTEM_PROMPT_NOTHOUGHT.replace("{screen_width}", str(resized_image.width)).replace("{screen_height}", str(resized_image.height))
     
     # Split system prompt into first line and rest
     # The first line is "You are a helpful assistant." or similar

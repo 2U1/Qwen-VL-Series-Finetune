@@ -76,8 +76,8 @@ class InstructionType(Enum):
 @dataclass
 class DatasetConfig:
     """Dataset variant configuration."""
-    dataset_variant: DatasetVariantType
     instruction_type: InstructionType
+    dataset_variant: Optional[DatasetVariantType] = None
 
 @dataclass
 class EvaluationConfig:
@@ -159,17 +159,10 @@ class DataLoader:
         df = pd.read_csv(self.csv_path)
         
         # Filter by dataset variant type
-        variant_value = self.dataset_config.dataset_variant.value
-        df = df[df["variant"] == variant_value]
-        
-        # Filter by instruction type
-        instruction_col = (
-            "step_instruction" 
-            if self.dataset_config.instruction_type == InstructionType.DIRECT_QUERY 
-            else "multi_element_instruction"
-        )
-        df = df[df[instruction_col].notna() & (df[instruction_col] != "")]
-        
+        if self.dataset_config.dataset_variant is not None:
+            variant_value = self.dataset_config.dataset_variant.value
+            df = df[df["variant"] == variant_value]
+
         return df.sort_values(["task_id", "step_index"]).reset_index(drop=True)
     
     def get_rows(self) -> List[Dict]:
@@ -263,6 +256,7 @@ class ModelClient:
         # the image_path can be inaccurate with the final file name which has the format of step_<index>_<action>.png
         # and the action can be wrong, so we need to get the correct image path from the task_id and step_index
         image_folder = image_path.parent
+        # use step index and the image folder only because image filename in the csv file sometimes has the wrong action name in the filename.
         search_pattern = f"step_{step_index}_*.png"
         image_files = list(image_folder.glob(search_pattern))
         
@@ -400,7 +394,6 @@ class EvaluationPreset:
     model_type: str
     model_name: str  # for vLLM server
     use_reasoning: bool
-    dataset_variant: DatasetVariantType
     instruction_type: InstructionType
 
 
@@ -408,19 +401,17 @@ def _create_preset(
     model_name: str,
     model_type: str,
     use_reasoning: bool,
-    dataset_variant: DatasetVariantType,
     instruction_type: InstructionType,
 ) -> EvaluationPreset:
     """Create a single preset with explicit config_id."""
     reasoning_str = "reasoning" if use_reasoning else "no_reasoning"
-    config_id = f"{model_type}_{reasoning_str}_{dataset_variant.value}_{instruction_type.value}"
+    config_id = f"{model_type}_{reasoning_str}_{instruction_type.value}"
     
     return EvaluationPreset(
         config_id=config_id,
         model_name=model_name,
         model_type=model_type,
         use_reasoning=use_reasoning,
-        dataset_variant=dataset_variant,
         instruction_type=instruction_type,
     )
 
@@ -428,12 +419,12 @@ def _create_preset(
 def _generate_all_presets() -> Dict[str, EvaluationPreset]:
     """Generate all possible evaluation configuration presets.
     
-    Generates 48 total combinations:
+    Generates 12 total combinations:
     - 3 models (gta1, qwen25vl, uitars15)
     - 2 reasoning modes (with/without)
-    - 4 dataset variants (style, precision, text_zoom, original)
     - 2 instruction types (direct_query, relational_query)
     
+    Note: dataset_variant is specified separately via CLI argument.
     This explicit structure makes it easy to verify correctness and debug.
     """
     presets = {}
@@ -448,30 +439,22 @@ def _generate_all_presets() -> Dict[str, EvaluationPreset]:
         "qwen25vl": "Qwen/Qwen2.5-VL-7B-Instruct",
         "uitars15": "ByteDance-Seed/UI-TARS-1.5-7B",
     }
-    DATASET_VARIANTS = [
-        DatasetVariantType.STYLE,
-        DatasetVariantType.PRECISION,
-        DatasetVariantType.TEXT_ZOOM,
-        DatasetVariantType.ORIGINAL,
-    ]
     INSTRUCTION_TYPES = [
         InstructionType.DIRECT_QUERY,
         InstructionType.RELATIONAL_QUERY,
     ]
     
-    # Generate all combinations
+    # Generate all combinations (without dataset_variant)
     for model_type in MODEL_TYPES:
         for use_reasoning in REASONING_MODES:
-            for dataset_variant in DATASET_VARIANTS:
-                for instruction_type in INSTRUCTION_TYPES:
-                    preset = _create_preset(
-                        model_name=MODEL_NAMES[model_type],
-                        model_type=model_type,
-                        use_reasoning=use_reasoning,
-                        dataset_variant=dataset_variant,
-                        instruction_type=instruction_type,
-                    )
-                    presets[preset.config_id] = preset
+            for instruction_type in INSTRUCTION_TYPES:
+                preset = _create_preset(
+                    model_name=MODEL_NAMES[model_type],
+                    model_type=model_type,
+                    use_reasoning=use_reasoning,
+                    instruction_type=instruction_type,
+                )
+                presets[preset.config_id] = preset
     
     return presets
 
@@ -510,7 +493,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output_dir", type=Path, required=True, help="Output directory")
     
     # Configuration selection
-    parser.add_argument("--config_id", type=str, default=None, help="Preset configuration ID (e.g., 'gta1_no_reasoning_style_direct_query')")
+    parser.add_argument("--config_id", type=str, default=None, help="Preset configuration ID (e.g., 'gta1_no_reasoning_direct_query')")
     parser.add_argument("--list_presets", action="store_true", help="List all available preset configuration IDs and exit")
     
     # Model configuration (optional overrides)
@@ -539,7 +522,7 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
             preset = EVALUATION_PRESETS[preset_id]
             print(f"  {preset_id}")
             print(f"    Model: {preset.model_type}, Reasoning: {preset.use_reasoning}, "
-                  f"Variant: {preset.dataset_variant.value}, Instruction: {preset.instruction_type.value}")
+                  f"Instruction: {preset.instruction_type.value}")
         exit(0)
     
     if args.config_id is None:
@@ -554,11 +537,20 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
             f"Valid types: {VALID_MODEL_TYPES}"
         )
     
+    # Parse dataset variant from CLI argument
+    try:
+        dataset_variant = DatasetVariantType(args.dataset_variant)
+    except ValueError:
+        raise ValueError(
+            f"Invalid dataset_variant: {args.dataset_variant}. "
+            f"Must be one of: {[v.value for v in DatasetVariantType]}"
+        )
+    
     # Log preset details for debugging
     logger.info(f"Using preset: {args.config_id}")
     logger.info(f"  model_type: {preset.model_type}")
     logger.info(f"  use_reasoning: {preset.use_reasoning}")
-    logger.info(f"  dataset_variant: {preset.dataset_variant.value}")
+    logger.info(f"  dataset_variant: {dataset_variant.value}")
     logger.info(f"  instruction_type: {preset.instruction_type.value}")
     
     model_config = ModelConfig(
@@ -580,7 +572,7 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
         )
     
     dataset_config = DatasetConfig(
-        dataset_variant=preset.dataset_variant,
+        dataset_variant=dataset_variant,
         instruction_type=preset.instruction_type,
     )
     
@@ -621,7 +613,7 @@ uv run eval/gui_perturbed_evaluator.py \
     --screenshots_base_dir /Users/lockewang/FIG/WebDomainRandomizer/test_splits/ \
     --output_dir data/gui_perturbed_eval/predictions \
     --seed 42 \
-    --config_id gta1_no_reasoning_style_direct_query
+    --config_id gta1_no_reasoning_direct_query
 """
 
 
