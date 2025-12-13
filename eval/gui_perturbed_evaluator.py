@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 from enum import Enum
-from io import BytesIO
 
 import pandas as pd
 from openai import OpenAI
@@ -261,9 +260,23 @@ class ModelClient:
         Returns:
             Resized image ready for inference
         """
-        with image_path.open("rb") as f:
-            image_bytes = f.read()
-        image = Image.open(BytesIO(image_bytes))
+        # the image_path can be inaccurate with the final file name which has the format of step_<index>_<action>.png
+        # and the action can be wrong, so we need to get the correct image path from the task_id and step_index
+        image_folder = image_path.parent
+        search_pattern = f"step_{step_index}_*.png"
+        image_files = list(image_folder.glob(search_pattern))
+        
+        if len(image_files) == 0:
+            raise FileNotFoundError(
+                f"Image files not found: pattern '{search_pattern}' in folder {image_folder} "
+                f"for task {task_id} and step {step_index}"
+            )
+        
+        image_file = image_files[0]
+        if len(image_files) > 1:
+            logger.warning(f"Multiple images found for task {task_id} step {step_index}, using: {image_file}")
+        
+        image = Image.open(image_file)
         if image.mode != "RGB":
             image = image.convert("RGB")
         
@@ -275,38 +288,11 @@ class ModelClient:
             metadata_str = format_metadata_string(task_id, step_index, variant)
             logger.warning(
                 f"[Image Dimension Check] Image is not {EXPECTED_IMAGE_WIDTH}x{EXPECTED_IMAGE_HEIGHT}: "
-                f"actual={original_width}x{original_height}{metadata_str} path={image_path}"
+                f"actual={original_width}x{original_height}{metadata_str} path={image_file}"
             )
 
         return image
 
-
-
-# ============================================================================
-# Prediction Saver
-# ============================================================================
-
-class PredictionSaver:
-    """Saves predictions to JSONL file with frequent flushing."""
-    
-    def __init__(self, output_path: Path, save_interval: int = 10):
-        self.output_path = output_path
-        self.save_interval = save_interval
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = output_path.open("w", encoding="utf-8")
-        self.count = 0
-    
-    def save(self, prediction: Dict):
-        """Save a single prediction and flush if needed."""
-        self.file.write(json.dumps(prediction, ensure_ascii=False) + "\n")
-        self.count += 1
-        
-        if self.count % self.save_interval == 0:
-            self.file.flush()
-    
-    def close(self):
-        """Close the output file."""
-        self.file.close()
 
 
 # ============================================================================
@@ -328,10 +314,8 @@ class Evaluator:
             config.api_url,
             config.api_key
         )
-        self.saver = PredictionSaver(
-            self._get_output_path(),
-            config.save_interval
-        )
+        self.output_path = self._get_output_path()
+        self.save_interval = config.save_interval
     
     def _get_output_path(self) -> Path:
         """Generate output file path based on configuration."""
@@ -353,14 +337,20 @@ class Evaluator:
         
         logger.info(f"Starting evaluation on {total_rows} rows")
         
-        for idx, row in enumerate(rows, 1):
-            prediction = self._process_row(row)
-            self.saver.save(prediction)
-            
-            if idx % 100 == 0:
-                logger.info(f"Processed {idx}/{total_rows} rows ({idx/total_rows*100:.1f}%)")
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        self.saver.close()
+        with open(self.output_path, "w", encoding="utf-8") as f:
+            for idx, row in enumerate(rows, 1):
+                prediction = self._process_row(row)
+                json.dump(prediction, f, ensure_ascii=False)
+                f.write("\n")
+                
+                if idx % self.save_interval == 0:
+                    f.flush()
+                
+                if idx % 100 == 0:
+                    logger.info(f"Processed {idx}/{total_rows} rows ({idx/total_rows*100:.1f}%)")
+        
         logger.info(f"Evaluation completed. Processed {total_rows} rows")
     
     def _process_row(self, row: Dict) -> Dict:
@@ -379,7 +369,7 @@ class Evaluator:
         logger.info(f"Instruction: {instruction}")
         logger.info(f"Image path: {image_path}")
         logger.info(f"Raw prediction: {raw_prediction}")
-        logger.info(f"Ground truth bbox: {row['gt_bbox']}")
+        logger.info(f"Ground truth bbox: {row['target_bounding_box']}")
         
         return {
             "task_id": row["task_id"],
@@ -408,12 +398,14 @@ class EvaluationPreset:
     """Predefined evaluation configuration preset."""
     config_id: str
     model_type: str
+    model_name: str  # for vLLM server
     use_reasoning: bool
     dataset_variant: DatasetVariantType
     instruction_type: InstructionType
 
 
 def _create_preset(
+    model_name: str,
     model_type: str,
     use_reasoning: bool,
     dataset_variant: DatasetVariantType,
@@ -425,6 +417,7 @@ def _create_preset(
     
     return EvaluationPreset(
         config_id=config_id,
+        model_name=model_name,
         model_type=model_type,
         use_reasoning=use_reasoning,
         dataset_variant=dataset_variant,
@@ -450,6 +443,11 @@ def _generate_all_presets() -> Dict[str, EvaluationPreset]:
     
     # Define all other dimensions explicitly
     REASONING_MODES = [False, True]
+    MODEL_NAMES = {
+        "gta1": "HelloKKMe/GTA1-7B",
+        "qwen25vl": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "uitars15": "ByteDance-Seed/UI-TARS-1.5-7B",
+    }
     DATASET_VARIANTS = [
         DatasetVariantType.STYLE,
         DatasetVariantType.PRECISION,
@@ -467,6 +465,7 @@ def _generate_all_presets() -> Dict[str, EvaluationPreset]:
             for dataset_variant in DATASET_VARIANTS:
                 for instruction_type in INSTRUCTION_TYPES:
                     preset = _create_preset(
+                        model_name=MODEL_NAMES[model_type],
                         model_type=model_type,
                         use_reasoning=use_reasoning,
                         dataset_variant=dataset_variant,
@@ -517,7 +516,7 @@ def parse_args() -> argparse.Namespace:
     # Model configuration (optional overrides)
     parser.add_argument("--model_name", type=str, default='ByteDance-Seed/UI-TARS-1.5-7B', help="HuggingFace model identifier for vLLM (e.g., 'ByteDance-Seed/UI-TARS-1.5-7B')")
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--max_tokens", type=int, default=1000000000)
+    parser.add_argument("--max_tokens", type=int, default=1000)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--language", type=str, default="English")
@@ -547,10 +546,7 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
         raise ValueError("--config_id is required. Use --list_presets to see available options.")
     
     preset = get_preset(args.config_id)
-    
-    if args.model_name is None:
-        raise ValueError("--model_name is required. Provide the HuggingFace model identifier used by vLLM (e.g., 'ByteDance-Seed/UI-TARS-1.5-7B'). Default is 'ByteDance-Seed/UI-TARS-1.5-7B'.")
-    
+
     # Validate preset model_type
     if preset.model_type not in VALID_MODEL_TYPES:
         raise ValueError(
@@ -566,7 +562,7 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
     logger.info(f"  instruction_type: {preset.instruction_type.value}")
     
     model_config = ModelConfig(
-        name=args.model_name,
+        name=preset.model_name,
         model_type=preset.model_type,
         use_reasoning=preset.use_reasoning,
         temperature=args.temperature,
