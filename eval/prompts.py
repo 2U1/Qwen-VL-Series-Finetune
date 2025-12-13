@@ -98,7 +98,7 @@ finished()
 call_user() # Submit the task and call the user when the task is unsolvable, or when you need the user's help.
 
 ## Note
-- Use {language} in `Thought` part.
+- Use English in `Thought` part.
 - Write a small plan and finally summarize your next action (with its target element) in one sentence in `Thought` part.
 
 ## User Instruction
