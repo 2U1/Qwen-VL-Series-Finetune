@@ -235,16 +235,13 @@ class ModelClient:
         return response.choices[0].message.content.strip()
 
     def build_messages(self, instruction: str, image: Image.Image, model_type: str, use_reasoning: bool) -> List[Dict[str, Any]]:
-        """Build messages for model inference."""
-        # Get resized image dimensions
-        resized_width, resized_height = image.size
-        
+        """Build messages for model inference.""" 
         if model_type == "gta1":
-            return build_gta1_messages(resized_height, resized_width, instruction, image, use_reasoning)
+            return build_gta1_messages(instruction, image, use_reasoning)
         elif model_type == "uitars15":
             return build_uitars15_messages(instruction, image, use_reasoning)
         elif model_type == "qwen25vl":
-            return build_qwen25vl_messages(instruction, image, resized_width, resized_height, use_reasoning)
+            return build_qwen25vl_messages(instruction, image, use_reasoning)
         else:
             raise ValueError(f"Invalid model type: {model_type}")
     
