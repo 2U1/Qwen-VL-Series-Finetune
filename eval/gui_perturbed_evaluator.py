@@ -44,6 +44,17 @@ MAX_RATIO = 200
 
 VALID_MODEL_TYPES = {"gta1", "qwen25vl", "uitars15"}
 
+# Model-specific default max_tokens
+# GTA1 only needs ~32 tokens for coordinate output (x,y), but we use 64 to be safe
+DEFAULT_MAX_TOKENS = {
+    ("gta1", False): 64,
+    ("gta1", True): 1000,
+    ("qwen25vl", False): 1000,
+    ("qwen25vl", True): 1000,
+    ("uitars15", False): 1000,
+    ("uitars15", True): 1000,
+}
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -318,7 +329,6 @@ class Evaluator:
             f"predictions_"
             f"{self.config.model_config.model_type}_"
             f"{'reasoning' if self.config.model_config.use_reasoning else 'no_reasoning'}_"
-            f"{self.config.dataset_config.dataset_variant.value}_"
             f"{self.config.dataset_config.instruction_type.value}_"
             f"{timestamp}.jsonl"
         )
@@ -333,22 +343,30 @@ class Evaluator:
         
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         
-        with open(self.output_path, "w", encoding="utf-8") as f:
-            for idx, row in enumerate(rows, 1):
-                prediction = self._process_row(row)
-                json.dump(prediction, f, ensure_ascii=False)
-                f.write("\n")
-                
-                if idx % self.save_interval == 0:
-                    f.flush()
-                
-                if idx % 100 == 0:
-                    logger.info(f"Processed {idx}/{total_rows} rows ({idx/total_rows*100:.1f}%)")
-        
+        try:
+            with open(self.output_path, "w", encoding="utf-8") as f:
+                for idx, row in enumerate(rows, 1):
+                    prediction = self._process_row(row, step_num=idx, total_rows=total_rows)
+                    json.dump(prediction, f, ensure_ascii=False)
+                    f.write("\n")
+                    
+                    if idx % self.save_interval == 0:
+                        f.flush()
+                    
+                    if idx % 100 == 0:
+                        logger.info(f"Processed {idx}/{total_rows} rows ({idx/total_rows*100:.1f}%)")
+        except Exception as e:
+            logger.error(f"Error processing row {idx}: {e}")
+            raise e
+
         logger.info(f"Evaluation completed. Processed {total_rows} rows")
     
-    def _process_row(self, row: Dict) -> Dict:
+    def _process_row(self, row: Dict, step_num: int, total_rows: int) -> Dict:
         """Process a single CSV row and return prediction."""
+        logger.info("=" * 80)
+        logger.info(f"Step {step_num}/{total_rows} ({step_num/total_rows*100:.1f}%)")
+        logger.info("=" * 80)
+        
         instruction = row["instruction"]
         image_path = self.data_loader.screenshots_base_dir / row["image_path"]
         
@@ -362,24 +380,29 @@ class Evaluator:
         raw_prediction = self.model_client.predict(instruction, image_path, metadata=metadata)
         logger.info(f"Instruction: {instruction}")
         logger.info(f"Image path: {image_path}")
-        logger.info(f"Raw prediction: {raw_prediction}")
+        
+        # Truncate very long predictions in logs (likely model hallucination)
+        if len(raw_prediction) > 500:
+            logger.warning(f"Raw prediction is unusually long ({len(raw_prediction)} chars), truncating log output")
+            logger.info(f"Raw prediction (first 500 chars): \n{raw_prediction[:500]}...")
+        else:
+            logger.info(f"Raw prediction: \n{raw_prediction}")
+        
         logger.info(f"Ground truth bbox: {row['target_bounding_box']}")
+        logger.info("=" * 80)
         
         return {
+            "model": self.config.model_config.model_type,
+            "use_reasoning": self.config.model_config.use_reasoning,
+            "query_type": self.config.dataset_config.instruction_type.value,
+            "test_split": row['split'],
+            "variant": metadata["variant"],
             "task_id": row["task_id"],
             "step_index": row["step_index"],
             "instruction": instruction,
-            "image_path": str(image_path),
             "raw_prediction": raw_prediction,
-            "model_config": {
-                "name": self.config.model_config.name,
-                "model_type": self.config.model_config.model_type,
-                "use_reasoning": self.config.model_config.use_reasoning,
-            },
-            "dataset_config": {
-                "dataset_variant": self.config.dataset_config.dataset_variant.value,
-                "instruction_type": self.config.dataset_config.instruction_type.value,
-            },
+            "ground_truth_bbox": row["target_bounding_box"],
+            "image_path": str(image_path),
         }
 
 
@@ -495,6 +518,7 @@ def parse_args() -> argparse.Namespace:
     # Configuration selection
     parser.add_argument("--config_id", type=str, default=None, help="Preset configuration ID (e.g., 'gta1_no_reasoning_direct_query')")
     parser.add_argument("--list_presets", action="store_true", help="List all available preset configuration IDs and exit")
+    parser.add_argument("--dataset_variant", default=None, type=str, choices=["style", "precision", "text_zoom", "original"], help="Dataset variant to evaluate")
     
     # Model configuration (optional overrides)
     parser.add_argument("--model_name", type=str, default='ByteDance-Seed/UI-TARS-1.5-7B', help="HuggingFace model identifier for vLLM (e.g., 'ByteDance-Seed/UI-TARS-1.5-7B')")
@@ -539,7 +563,10 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
     
     # Parse dataset variant from CLI argument
     try:
-        dataset_variant = DatasetVariantType(args.dataset_variant)
+        if args.dataset_variant is not None:
+            dataset_variant = DatasetVariantType(args.dataset_variant)
+        else:
+            dataset_variant = None
     except ValueError:
         raise ValueError(
             f"Invalid dataset_variant: {args.dataset_variant}. "
@@ -550,15 +577,24 @@ def build_config(args: argparse.Namespace) -> EvaluationConfig:
     logger.info(f"Using preset: {args.config_id}")
     logger.info(f"  model_type: {preset.model_type}")
     logger.info(f"  use_reasoning: {preset.use_reasoning}")
-    logger.info(f"  dataset_variant: {dataset_variant.value}")
+    logger.info(f"  dataset_variant: {dataset_variant.value if dataset_variant is not None else 'None'}")
     logger.info(f"  instruction_type: {preset.instruction_type.value}")
+    
+    # Set model-specific default max_tokens if using default value
+    # GTA1 only needs ~32 tokens for coordinate output (x,y), but we use 64 to be safe
+    if args.max_tokens == 1000:  # Using default value
+        max_tokens = DEFAULT_MAX_TOKENS.get((preset.model_type, preset.use_reasoning), args.max_tokens)
+    else:
+        max_tokens = args.max_tokens  # User explicitly set a value
+    
+    logger.info(f"  max_tokens: {max_tokens}")
     
     model_config = ModelConfig(
         name=preset.model_name,
         model_type=preset.model_type,
         use_reasoning=preset.use_reasoning,
         temperature=args.temperature,
-        max_tokens=args.max_tokens,
+        max_tokens=max_tokens,
         top_p=args.top_p,
         seed=args.seed,
         language=args.language,
