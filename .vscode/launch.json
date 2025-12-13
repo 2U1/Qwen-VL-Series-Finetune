@@ -52,7 +52,7 @@
           "--config_id",
           "gta1_no_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -80,7 +80,7 @@
           "--config_id",
           "gta1_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -108,7 +108,7 @@
           "--config_id",
           "gta1_no_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -136,7 +136,7 @@
           "--config_id",
           "gta1_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -164,7 +164,7 @@
           "--config_id",
           "qwen25vl_no_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -192,7 +192,7 @@
           "--config_id",
           "qwen25vl_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -220,7 +220,7 @@
           "--config_id",
           "qwen25vl_no_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -248,7 +248,7 @@
           "--config_id",
           "qwen25vl_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -276,7 +276,7 @@
           "--config_id",
           "uitars15_no_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -304,7 +304,7 @@
           "--config_id",
           "uitars15_reasoning_direct_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -332,7 +332,7 @@
           "--config_id",
           "uitars15_no_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       },
       {
@@ -360,7 +360,7 @@
           "--config_id",
           "uitars15_reasoning_relational_query",
           "--save_interval",
-          "10"
+          "1"
         ]
       }
     ]
