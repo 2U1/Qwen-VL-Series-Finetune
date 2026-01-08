@@ -289,3 +289,7 @@ class DataArguments:
     video_resized_height: int = field(default=None)
     fps: Optional[int] = field(default=None, metadata={"help": "Frames per second for video data."})
     nframes: Optional[int] = field(default=None, metadata={"help": "Number of frames for video data."})
+    max_train_samples: Optional[int] = field(
+        default=None,
+        metadata={"help": "Maximum number of training samples to use. If set, limits the dataset to this many samples for fair comparison across data variants."}
+    )

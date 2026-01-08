@@ -276,7 +276,8 @@ def train():
 
     data_module = make_supervised_data_module(model_id=model_args.model_id,
                                               processor=processor,
-                                              data_args=data_args)
+                                              data_args=data_args,
+                                              training_seed=training_args.seed)
 
     trainer = QwenSFTTrainer(
         model=model,

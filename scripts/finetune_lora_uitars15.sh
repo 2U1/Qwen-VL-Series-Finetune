@@ -15,7 +15,7 @@ SETUP="${SETUP:-A100}"  # Default to A100, override with: SETUP=L4 bash script.s
 if [ "$SETUP" == "A100" ]; then
     # A100 Single GPU Configuration
     NUM_DEVICES=1
-    BATCH_PER_DEVICE=16
+    BATCH_PER_DEVICE=8
     GLOBAL_BATCH_SIZE=128
     GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
     DEEPSPEED_CONFIG="scripts/zero3_offload.json"
@@ -74,21 +74,28 @@ if [ -n "$EVAL_PATH" ]; then
     EVAL_ARGS="$EVAL_ARGS --eval_strategy epoch --per_device_eval_batch_size $EVAL_BATCH_SIZE"
 fi
 
+# Add max_train_samples if specified (for fair comparison across data variants)
+MAX_SAMPLES_ARGS="6500"
+if [ -n "$MAX_TRAIN_SAMPLES" ]; then
+    MAX_SAMPLES_ARGS="--max_train_samples $MAX_TRAIN_SAMPLES"
+fi
+
 deepspeed src/train/train_sft.py \
     --use_liger True \
     --lora_enable True \
     --use_dora False \
     --lora_namespan_exclude "['lm_head', 'embed_tokens']" \
-    --lora_rank 64 \
-    --lora_alpha 64 \
+    --lora_rank 8 \
+    --lora_alpha 8 \
     --lora_dropout 0.05 \
-    --num_lora_modules -1 \
+    --num_lora_modules 32 \
     --deepspeed $DEEPSPEED_CONFIG \
     --model_id $MODEL_NAME \
     --data_path $DATA_PATH \
     --image_folder $IMAGE_FOLDER \
     --remove_unused_columns False \
     $EVAL_ARGS \
+    $MAX_SAMPLES_ARGS \
     --freeze_vision_tower True \
     --freeze_llm True \
     --freeze_merger True \
@@ -101,7 +108,7 @@ deepspeed src/train/train_sft.py \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --image_min_pixels $((256 * 28 * 28)) \
     --image_max_pixels $((16384 * 28 * 28)) \
-    --learning_rate 1e-4 \
+    --learning_rate 1e-5 \
     --merger_lr 1e-5 \
     --vision_lr 2e-6 \
     --weight_decay 0.1 \
