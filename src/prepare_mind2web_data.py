@@ -3,14 +3,23 @@ import os
 import sys
 import shutil
 import math
+import re
+from collections import Counter
 from PIL import Image
 import pandas as pd
 
 GUIPERTURB_TRAINING_SAMPLE_LIST_PATH = '/mnt/disks/sca-data/filtered_gui_dataset_100k.json'
-OUTPUT_DATA_DIR = '/mnt/disks/sca-data/processed_training_data'
+CSV_TRAINING_SAMPLE_LIST_PATH = '/Users/lockewang/Downloads/variant_data_cleaned.csv'
+# OUTPUT_DATA_DIR = '/mnt/disks/sca-data/processed_training_data'
+OUTPUT_DATA_DIR = '/Users/lockewang/Downloads/test_output'
 
 def filter_style_variant(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter dataframe for style variant: run folders ending with *_style or *_train."""
+    """Filter dataframe for style variant: run folders ending with *_style or *_train, or using variant column."""
+    # Check if CSV format with variant column
+    if 'variant' in df.columns:
+        return df[df['variant'].isin(['style', 'original'])].reset_index(drop=True)
+    
+    # Fallback to original folder-based filtering for JSON format
     def is_style_run_folder(screenshot_path: str) -> bool:
         try:
             run_folder, _, _ = extract_path_components(screenshot_path)
@@ -23,7 +32,12 @@ def filter_style_variant(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def filter_text_shrink_zoom_variant(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter dataframe for text_shrink/zoom variant: run folders ending with *_text_shrink or *_precision."""
+    """Filter dataframe for text_shrink/zoom variant: run folders ending with *_text_shrink or *_precision, or using variant column."""
+    # Check if CSV format with variant column
+    if 'variant' in df.columns:
+        return df[df['variant'].isin(['text_shrink', 'precision'])].reset_index(drop=True)
+    
+    # Fallback to original folder-based filtering for JSON format
     def is_text_shrink_zoom_run_folder(screenshot_path: str) -> bool:
         try:
             run_folder, _, _ = extract_path_components(screenshot_path)
@@ -45,16 +59,24 @@ def create_balanced_val_set(df: pd.DataFrame, val_ratio: float = 0.1, random_sta
     Returns:
         Filtered dataframe with balanced validation samples
     """
-    # Extract run folders from screenshot paths
-    def get_run_folder(screenshot_path: str) -> str:
+    # Check if CSV format
+    is_csv_format = 'image_path' in df.columns
+    
+    def get_run_folder(row_or_path):
         try:
-            run_folder, _, _ = extract_path_components(screenshot_path)
+            if is_csv_format:
+                run_folder, _, _ = extract_path_components_from_csv(row_or_path)
+            else:
+                run_folder, _, _ = extract_path_components(row_or_path)
             return run_folder
         except:
             return None
     
     df_with_run_folder = df.copy()
-    df_with_run_folder['run_folder'] = df_with_run_folder['screenshot'].apply(get_run_folder)
+    if is_csv_format:
+        df_with_run_folder['run_folder'] = df_with_run_folder.apply(get_run_folder, axis=1)
+    else:
+        df_with_run_folder['run_folder'] = df_with_run_folder['screenshot'].apply(get_run_folder)
     
     # Group by run folder
     val_samples = []
@@ -67,9 +89,20 @@ def create_balanced_val_set(df: pd.DataFrame, val_ratio: float = 0.1, random_sta
     return val_df.drop(columns=['run_folder']).reset_index(drop=True)
 
 
-def load_training_dataframe() -> pd.DataFrame:
-    """Load the training dataframe from the JSON file."""
-    return pd.read_json(GUIPERTURB_TRAINING_SAMPLE_LIST_PATH)
+def load_training_dataframe(data_path: str = None) -> pd.DataFrame:
+    """Load the training dataframe from JSON or CSV file."""
+    if data_path is None:
+        # Try CSV first, fallback to JSON
+        if os.path.exists(CSV_TRAINING_SAMPLE_LIST_PATH):
+            data_path = CSV_TRAINING_SAMPLE_LIST_PATH
+        else:
+            data_path = GUIPERTURB_TRAINING_SAMPLE_LIST_PATH
+    
+    # Determine format by extension
+    if data_path.endswith('.csv'):
+        return pd.read_csv(data_path)
+    else:
+        return pd.read_json(data_path)
 
 
 def extract_path_components(screenshot_path: str) -> tuple[str, str, int]:
@@ -100,6 +133,68 @@ def extract_path_components(screenshot_path: str) -> tuple[str, str, int]:
     
     # Extract step_index from filename (format: step_<index>_<action>.png)
     step_index = int(filename.split('_')[1])
+    
+    return run_folder, episode_id, step_index
+
+
+def parse_target_coordinates(coord_str: str) -> tuple[int, int]:
+    """Parse target_coordinates string '(x, y)' to (x, y) tuple."""
+    match = re.match(r'\((\d+),\s*(\d+)\)', coord_str)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    raise ValueError(f"Invalid coordinate format: {coord_str}")
+
+
+def extract_op_from_image_path(image_path: str) -> str:
+    """Extract action type from image filename (e.g., step_3_click.png -> 'click')."""
+    filename = os.path.basename(image_path)
+    match = re.search(r'step_\d+_(\w+)\.png', filename)
+    if match:
+        return match.group(1)
+    raise ValueError(f"Could not extract action type from: {image_path}")
+
+
+def extract_type_value_from_instruction(instruction: str) -> str | None:
+    """Extract type content from instruction (e.g., 'Type 'pork'...' -> 'pork'). Returns None if no value found."""
+    # Try pattern: Type 'value' or Type "value"
+    patterns = [
+        r"Type\s+['\"]([^'\"]+)['\"]",  # Matches both single and double quotes
+        r"Type\s+['\"]([^'\"]*?)['\"]",  # Non-greedy version
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, instruction)
+        if match:
+            return match.group(1)
+    return None  # No value found - instruction is just "Type the textbox above X"
+
+
+def extract_path_components_from_csv(row: pd.Series) -> tuple[str, str, int]:
+    """
+    Extract run_folder, episode_id, and step_index from CSV row.
+    Args:
+        row: DataFrame row with CSV data
+    Returns:
+        (run_folder, episode_id, step_index): Tuple of extracted components
+    """
+    image_path = row['image_path']
+    parts = [p for p in image_path.split('/') if p]
+    
+    # Find screenshots directory index
+    screenshots_idx = None
+    for i, part in enumerate(parts):
+        if part == 'screenshots':
+            screenshots_idx = i
+            break
+    
+    if screenshots_idx is None:
+        raise ValueError(f"Could not find 'screenshots' directory in path: {image_path}")
+    
+    # episode_id (task_id) is the directory before screenshots
+    episode_id = parts[screenshots_idx - 1]
+    # run_folder is the directory before episode_id
+    run_folder = parts[screenshots_idx - 2]
+    # step_index is from the column
+    step_index = int(row['step_index'])
     
     return run_folder, episode_id, step_index
 
@@ -242,12 +337,19 @@ def generate_action_prediction(row: pd.Series, screenshot_path: str) -> str:
     Returns:
         Action prediction string
     """
-    op = row['op'].lower()
-    type_action_value = row.get('type_action_value', '')
+    # Extract op from filename if not in row (CSV format)
+    if 'op' in row and pd.notna(row['op']):
+        op = row['op'].lower()
+    elif 'image_path' in row:
+        op = extract_op_from_image_path(row['image_path']).lower()
+    else:
+        raise ValueError(f"Could not determine action type from row")
     
-    if op in ['click', 'hover', 'click (fake)']:
-        # Use click_x and click_y from row, or coordinates if available
-        if 'click_x' in row and 'click_y' in row:
+    if op in ['click', 'hover', 'click (fake)', 'select']:
+        # Parse target_coordinates from CSV format "(x, y)" or use JSON format
+        if 'target_coordinates' in row and pd.notna(row['target_coordinates']):
+            click_x, click_y = parse_target_coordinates(row['target_coordinates'])
+        elif 'click_x' in row and 'click_y' in row:
             click_x, click_y = row['click_x'], row['click_y']
         elif 'coordinates' in row and isinstance(row['coordinates'], (list, tuple)) and len(row['coordinates']) >= 2:
             click_x, click_y = row['coordinates'][0], row['coordinates'][1]
@@ -260,9 +362,45 @@ def generate_action_prediction(row: pd.Series, screenshot_path: str) -> str:
         print(f"Ground truth action: {ground_truth_action}")
         return ground_truth_action
     elif op == "type":
-        if type_action_value is None:
-            raise ValueError(f"Missing type_action_value for type action in row")
-        ground_truth_action = f"Action: type(content='{type_action_value}')"
+        # Extract coordinates for click action (same logic as click actions)
+        if 'target_coordinates' in row and pd.notna(row['target_coordinates']):
+            click_x, click_y = parse_target_coordinates(row['target_coordinates'])
+        elif 'click_x' in row and 'click_y' in row:
+            click_x, click_y = row['click_x'], row['click_y']
+        elif 'coordinates' in row and isinstance(row['coordinates'], (list, tuple)) and len(row['coordinates']) >= 2:
+            click_x, click_y = row['coordinates'][0], row['coordinates'][1]
+        else:
+            raise ValueError(f"Missing coordinates for type action in row")
+        
+        # Normalize coordinates
+        original_width, original_height = get_image_dimensions(screenshot_path)
+        normalized_coordinates = prepare_training_coordinates(click_x, click_y, original_width, original_height)
+        
+        # Extract type value from instruction if not in row
+        # CSV format: try multi_element_instruction first, then step_instruction
+        # JSON format: use step_instruction (backward compatible)
+        if 'type_action_value' in row and pd.notna(row['type_action_value']):
+            type_action_value = row['type_action_value']
+        elif 'multi_element_instruction' in row and pd.notna(row['multi_element_instruction']):
+            type_action_value = extract_type_value_from_instruction(row['multi_element_instruction'])
+        elif 'step_instruction' in row:
+            type_action_value = extract_type_value_from_instruction(row['step_instruction'])
+        else:
+            type_action_value = None
+        
+        # If no type value found, treat as click action instead (e.g., "Type the textbox above X" = just click)
+        # This handles both CSV and JSON formats
+        # Note: normalized_coordinates already calculated above, so we can reuse them
+        if type_action_value is None or type_action_value == '':
+            # Fall back to click action - this handles cases like "Type the textbox above X" or "Click on the textbox"
+            ground_truth_action = f"Action: click(start_box='({normalized_coordinates[0]}, {normalized_coordinates[1]})')"
+            print(f"Ground truth action (type->click fallback): {ground_truth_action}")
+            return ground_truth_action
+        
+        # Generate combined action: click first, then type, separated by \n\n
+        click_action = f"Action: click(start_box='({normalized_coordinates[0]}, {normalized_coordinates[1]})')"
+        type_action = f"type(content='{type_action_value}')"
+        ground_truth_action = f"{click_action}\n\n{type_action}"
         print(f"Ground truth action: {ground_truth_action}")
         return ground_truth_action
     elif op == "press enter":
@@ -276,58 +414,98 @@ def generate_action_prediction(row: pd.Series, screenshot_path: str) -> str:
     else:
         raise ValueError(f"Unknown action type: {op}")
 
-def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots_dir: str) -> dict | None:
+def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots_dir: str) -> tuple[dict | None, str | None]:
     """
     Process a single row from the dataframe to create a training entry.
+    Supports both JSON and CSV formats.
     Args:
         row: DataFrame row with sample data
         parent_directory: Root directory containing run folders
         output_screenshots_dir: Directory to copy screenshots to
     Returns:
-        Training entry dict or None if processing fails
+        Tuple of (Training entry dict or None if processing fails, error reason string or None)
     """
-    # Extract path components
-    screenshot_path = row['screenshot']
-    run_folder, episode_id, step_index = extract_path_components(screenshot_path)
+    # Check if CSV format (has image_path) or JSON format (has screenshot)
+    is_csv_format = 'image_path' in row
     
-    # Construct paths
-    episode_dir = os.path.join(parent_directory, run_folder, episode_id)
-    screenshots_dir = os.path.join(episode_dir, "screenshots")
-    
-    # Find the actual screenshot file
-    screenshot_filename = find_screenshot_file(screenshots_dir, step_index)
-    if screenshot_filename is None:
-        return None
-    
-    src_screenshot_path = os.path.join(screenshots_dir, screenshot_filename)
-    if not os.path.exists(src_screenshot_path):
-        return None
+    if is_csv_format:
+        # CSV format: extract components and search by step_index pattern (robust)
+        image_path = row['image_path']  # Keep for reference, but don't use for file lookup
+        run_folder, episode_id, step_index = extract_path_components_from_csv(row)
+        
+        # Construct directory path (same as JSON format)
+        episode_dir = os.path.join(parent_directory, run_folder, episode_id)
+        screenshots_dir = os.path.join(episode_dir, "screenshots")
+        
+        # Find the actual screenshot file by step_index pattern (robust)
+        screenshot_filename = find_screenshot_file(screenshots_dir, step_index)
+        if screenshot_filename is None:
+            return None, f"Screenshot file not found in directory: {screenshots_dir} (step_index: {step_index})"
+        
+        src_screenshot_path = os.path.join(screenshots_dir, screenshot_filename)
+        if not os.path.exists(src_screenshot_path):
+            return None, f"Screenshot file not found: {src_screenshot_path}"
+    else:
+        # JSON format: screenshot is absolute path, extract components from path
+        screenshot_path = row['screenshot']
+        run_folder, episode_id, step_index = extract_path_components(screenshot_path)
+        
+        # Construct paths
+        episode_dir = os.path.join(parent_directory, run_folder, episode_id)
+        screenshots_dir = os.path.join(episode_dir, "screenshots")
+        
+        # Find the actual screenshot file
+        screenshot_filename = find_screenshot_file(screenshots_dir, step_index)
+        if screenshot_filename is None:
+            return None, f"Screenshot file not found in directory: {screenshots_dir} (step_index: {step_index})"
+        
+        src_screenshot_path = os.path.join(screenshots_dir, screenshot_filename)
+        if not os.path.exists(src_screenshot_path):
+            return None, f"Screenshot file not found: {src_screenshot_path}"
     
     # Copy screenshot to output directory
     new_filename = f"{episode_id}_{screenshot_filename}"
     dst_screenshot_path = os.path.join(output_screenshots_dir, new_filename)
     
     try:
-        shutil.copy(src_screenshot_path, dst_screenshot_path)  # Use copy() instead of copy2() - faster, no metadata needed
+        shutil.copy(src_screenshot_path, dst_screenshot_path)
     except Exception as e:
-        print(f"  Warning: Failed to copy {src_screenshot_path}: {e}")
-        return None
+        error_msg = f"Failed to copy screenshot: {src_screenshot_path} -> {dst_screenshot_path}: {e}"
+        print(f"  Warning: {error_msg}")
+        return None, error_msg
     
-    # Validate required fields
-    step_instruction = row.get('step_instruction')
-    op = row.get('op')
+    # Validate required fields - use multi_element_instruction for CSV, step_instruction for JSON
+    if is_csv_format:
+        instruction = row.get('multi_element_instruction')
+        if instruction is None:
+            return None, "Missing multi_element_instruction field"
+    else:
+        instruction = row.get('step_instruction')
+        if instruction is None:
+            return None, "Missing step_instruction field"
     
-    if step_instruction is None or op is None:
-        return None
+    # Extract op from filename if not in row (CSV format)
+    if 'op' in row and pd.notna(row['op']):
+        op = row['op']
+    elif is_csv_format:
+        try:
+            op = extract_op_from_image_path(image_path)
+        except Exception as e:
+            return None, f"Failed to extract op from image_path: {e}"
+    else:
+        op = row.get('op')
+        if op is None:
+            return None, "Missing op field"
     
     # Generate prompt and prediction
-    prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=step_instruction)}"
+    prompt = f"<image>\n{UITARS_USR_PROMPT_NOTHOUGHT.format(instruction=instruction)}"
     
     try:
         prediction = generate_action_prediction(row, src_screenshot_path)
     except Exception as e:
-        print(f"  Warning: Failed to generate action for {episode_id} step {step_index}: {e}")
-        return None
+        error_msg = f"Failed to generate action for {episode_id} step {step_index}: {e}"
+        print(f"  Warning: {error_msg}")
+        return None, error_msg
     
     # Create training entry
     entry = {
@@ -339,7 +517,7 @@ def process_sample_row(row: pd.Series, parent_directory: str, output_screenshots
         ]
     }
     
-    return entry
+    return entry, None
 
 
 def main():
@@ -348,9 +526,13 @@ def main():
         print("Usage: python prepare_mind2web_data.py <parent_directory> [variant] [max_samples]")
         print("Variants:")
         print("  (default) - All samples")
-        print("  style - Style variant (run folders ending with *_style or *_train)")
-        print("  text_shrink_zoom - Text shrink/zoom variant (run folders ending with *_text_shrink or *_precision)")
+        print("  style - Style variant (run folders ending with *_style or *_train, or variant='style'/'original' in CSV)")
+        print("  text_shrink_zoom - Text shrink/zoom variant (run folders ending with *_text_shrink or *_precision, or variant='text_shrink'/'precision' in CSV)")
         print("  val - Balanced validation set (10% evenly from each run folder)")
+        print("\nData formats supported:")
+        print("  - JSON format: expects 'screenshot', 'op', 'step_instruction', 'click_x', 'click_y' columns")
+        print("  - CSV format: expects 'image_path', 'step_index', 'task_id', 'variant', 'multi_element_instruction', 'target_coordinates' columns")
+        print("    CSV format auto-detected if CSV_TRAINING_SAMPLE_LIST_PATH exists, otherwise uses JSON")
         print("\nExamples:")
         print("  python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits")
         print("  python prepare_mind2web_data.py /mnt/disks/sca-data/all_training_splits style")
@@ -463,12 +645,19 @@ def main():
     processed_count = 0
     skipped_count = 0
     already_exists_count = 0
+    skipped_samples = []  # Track skipped samples with reasons
+    
+    # Check if CSV format
+    is_csv_format = 'image_path' in df.columns
     
     print(f"\nProcessing {len(df)} samples...")
     for idx, row in df.iterrows():
         # Extract entry ID to check if already processed
-        screenshot_path = row['screenshot']
-        run_folder, episode_id, step_index = extract_path_components(screenshot_path)
+        if is_csv_format:
+            run_folder, episode_id, step_index = extract_path_components_from_csv(row)
+        else:
+            screenshot_path = row['screenshot']
+            run_folder, episode_id, step_index = extract_path_components(screenshot_path)
         entry_id = f"{run_folder}_{episode_id}_step_{step_index}"
         
         # Skip if already processed
@@ -480,7 +669,7 @@ def main():
         
         print(f"Processing sample {idx + 1}/{len(df)}: {entry_id}")
         # Process the row (will overwrite image if it exists to prevent corruption)
-        entry = process_sample_row(row, parent_directory, output_screenshots_dir)
+        entry, error_reason = process_sample_row(row, parent_directory, output_screenshots_dir)
         
         if entry is not None:
             all_training_data.append(entry)
@@ -499,6 +688,11 @@ def main():
                 print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
         else:
             skipped_count += 1
+            skipped_samples.append({
+                'entry_id': entry_id,
+                'reason': error_reason or 'Unknown error',
+                'row_index': idx
+            })
             if (idx + 1) % 1000 == 0:
                 print(f"  Processed {idx + 1}/{len(df)} samples ({processed_count} new, {already_exists_count} existing, {skipped_count} failed)...")
     
@@ -514,6 +708,27 @@ def main():
     print(f"Newly processed: {processed_count}")
     print(f"Already existed: {already_exists_count}")
     print(f"Skipped (failed): {skipped_count}")
+    
+    # Print skipped samples for debugging
+    if skipped_count > 0:
+        print(f"\n{'='*60}")
+        print(f"SKIPPED SAMPLES DETAILS ({skipped_count} total):")
+        print(f"{'='*60}")
+        for i, skipped in enumerate(skipped_samples, 1):
+            print(f"\n{i}. Entry ID: {skipped['entry_id']}")
+            print(f"   Row Index: {skipped['row_index']}")
+            print(f"   Reason: {skipped['reason']}")
+        
+        # Group by reason for summary
+        reason_counts = Counter(s['reason'] for s in skipped_samples)
+        print(f"\n{'='*60}")
+        print("SKIP REASONS SUMMARY:")
+        print(f"{'='*60}")
+        for reason, count in reason_counts.most_common():
+            print(f"  {count:3d} - {reason}")
+        print(f"{'='*60}")
+        print("\nPress Enter to continue...")
+        input()  # Pause for debugging
     
     print(f"\nSuccessfully wrote training data to {output_file_path}")
     print(f"Total screenshots in output directory: {len(all_training_data)}")
