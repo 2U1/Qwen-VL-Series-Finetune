@@ -1,26 +1,58 @@
+#!/usr/bin/env python3
 """
 Script for UITARS15_v1, based on https://github.com/xlang-ai/OSWorld/blob/main/mm_agents/uitars15_v1.py
+
+Designed to work with vLLM serving models like:
+    vllm serve "ByteDance-Seed/UI-TARS-1.5-7B"
+
+Usage:
+    python standalone_predict.py image.png "Click on the login button"    
+
+
+Raw Prediction Example:
+```
+Action: click(start_box='(1479,503)')
+```
+
+save:
+1. predictions
+
+metrics:
+0. ~~action str exact match~~
+1. hit box accuracy
+2. MSE(distance to center of the bounding box)
 """
 
+import sys
+import os
 import ast
 import base64
-from openai import OpenAI
 import math
 import re
-import xml.etree.ElementTree as ET
+import argparse
+import json
+from collections import OrderedDict
+from collections import deque
 from io import BytesIO
-from typing import Dict, List
-import numpy as np
-import base64
-from loguru import logger
-import os
-import re
-from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional, Sequence, Any, Deque
 from PIL import Image
-from mm_agents.accessibility_tree_wrap.heuristic_retrieve import (
-    filter_nodes,
-)
+
+from eval.mind2web_mapping import uitars_action_to_mind2web_op
+
+try:
+    from openai import OpenAI
+except ImportError:
+    print("Error: openai package not installed. Install with: pip install openai")
+    sys.exit(1)
+
+# ============================================================================
+# Constants and Prompts (from uitars15_v1.py)
+# ============================================================================
+
+IMAGE_FACTOR = 28
+MIN_PIXELS = 100 * 28 * 28
+MAX_PIXELS = 16384 * 28 * 28
+MAX_RATIO = 200
 
 UITARS_ACTION_SPACE = """
 click(start_box='<|box_start|>(x1,y1)<|box_end|>')
@@ -32,51 +64,6 @@ type(content='') #If you want to submit your input, use "\\n" at the end of `con
 scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left')
 wait() #Sleep for 5s and take a screenshot to check for any changes.
 finished()
-"""
-
-UITARS_CALL_USR_ACTION_SPACE = """
-click(start_box='<|box_start|>(x1,y1)<|box_end|>')
-left_double(start_box='<|box_start|>(x1,y1)<|box_end|>')
-right_single(start_box='<|box_start|>(x1,y1)<|box_end|>')
-drag(start_box='<|box_start|>(x1,y1)<|box_end|>', end_box='<|box_start|>(x3,y3)<|box_end|>')
-hotkey(key='')
-type(content='') #If you want to submit your input, use "\\n" at the end of `content`.
-scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left')
-wait() #Sleep for 5s and take a screenshot to check for any changes.
-finished()
-call_user() # Submit the task and call the user when the task is unsolvable, or when you need the user's help.
-"""
-
-UITARS_NORMAL_ACTION_SPACE = """
-click(start_box='<|box_start|>(x1,y1)<|box_end|>')
-left_double(start_box='<|box_start|>(x1,y1)<|box_end|>')
-right_single(start_box='<|box_start|>(x1,y1)<|box_end|>')
-drag(start_box='<|box_start|>(x1,y1)<|box_end|>', end_box='<|box_start|>(x3,y3)<|box_end|>')
-hotkey(key='')
-type(content='') #If you want to submit your input, use "\\n" at the end of `content`.
-scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left')
-wait() #Sleep for 5s and take a screenshot to check for any changes.
-finished(content='xxx') # Use escape characters \\', \\", and \\n in content part to ensure we can parse the content in normal python string format.
-"""
-
-UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
-## Output Format
-```
-Action: ...
-```
-## Action Space
-click(start_box='<|box_start|>(x1,y1)<|box_end|>')
-left_double(start_box='<|box_start|>(x1,y1)<|box_end|>')
-right_single(start_box='<|box_start|>(x1,y1)<|box_end|>')
-drag(start_box='<|box_start|>(x1,y1)<|box_end|>', end_box='<|box_start|>(x3,y3)<|box_end|>')
-hotkey(key='')
-type(content='') #If you want to submit your input, use "\\n" at the end of `content`.
-scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left')
-wait() #Sleep for 5s and take a screenshot to check for any changes.
-finished()
-call_user() # Submit the task and call the user when the task is unsolvable, or when you need the user's help.
-## User Instruction
-{instruction}
 """
 
 UITARS_USR_PROMPT_THOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
@@ -98,65 +85,90 @@ Action: ...
 {instruction}
 """
 
-FINISH_WORD = "finished"
-WAIT_WORD = "wait"
-ENV_FAIL_WORD = "error_env"
-CALL_USER = "call_user"
+UITARS_USR_PROMPT_NOTHOUGHT = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task. 
+## Output Format
+```
+Action: ...
+```
+## Action Space
+{action_space}
+## User Instruction
+{instruction}
+"""
 
-IMAGE_FACTOR = 28
-MIN_PIXELS = 100 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
-MAX_RATIO = 200
+# GTA1-style system prompt: instruct model to return a single coordinate pair
+GTA1_SYSTEM_PROMPT = (
+    "You are an expert UI element locator. "
+    "Given a GUI image and a user's element description, provide the coordinates of the specified element as a single (x,y) point. "
+    "The image resolution is height {height} and width {width}. For elements with area, return the center point.\n\n"
+    "Output the coordinate pair exactly:\n(x,y)"
+)
 
-# 定义一个函数来解析每个 action
+# Qwen2.5-VL "tools"-style system prompt template. Follows the guided function-calling
+# pattern and includes screen width/height placeholders.
+QWEN25_TOOLS_SYSTEM_TEMPLATE = (
+    "You are a helpful assistant.\n\n\n"
+    "# Tools\n\n"
+    "You may call one or more functions to assist with the user query.\n\n"
+    "You are provided with function signatures within <tools></tools> XML tags:\n"
+    "<tools>\n"
+    "{\"type\": \"function\", \"function\": {\"name_for_human\": \"computer_use\", \"name\": \"computer_use\", \"description\": \"Use a mouse and keyboard to interact with a computer, and take screenshots.\\n* This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions. E.g. if you click on Firefox and a window doesn't open, try wait and taking another screenshot.\\n* The screen's resolution is {screen_width}x{screen_height}.\\n* Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.\\n* If you tried clicking on a program or link but it failed to load, even after waiting, try adjusting your cursor position so that the tip of the cursor visually falls on the element that you want to click.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.\", \"parameters\": {\"properties\": {\"action\": {\"description\": \"The action to perform. The available actions are:\\n* `key`: Performs key down presses on the arguments passed in order, then performs key releases in reverse order.\\n* `type`: Type a string of text on the keyboard.\\n* `mouse_move`: Move the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `left_click`: Click the left mouse button.\\n* `left_click_drag`: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `right_click`: Click the right mouse button.\\n* `middle_click`: Click the middle mouse button.\\n* `double_click`: Double-click the left mouse button.\\n* `scroll`: Performs a scroll of the mouse scroll wheel.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `terminate`: Terminate the current task and report its completion status.\", \"enum\": [\"key\", \"type\", \"mouse_move\", \"left_click\", \"left_click_drag\", \"right_click\", \"middle_click\", \"double_click\", \"scroll\", \"wait\", \"terminate\"], \"type\": \"string\"}, \"keys\": {\"description\": \"Required only by `action=key`.\", \"type\": \"array\"}, \"text\": {\"description\": \"Required only by `action=type`.\", \"type\": \"string\"}, \"coordinate\": {\"description\": \"(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=mouse_move` and `action=left_click_drag`.\", \"type\": \"array\"}, \"pixels\": {\"description\": \"The amount of scrolling to perform. Positive values scroll up, negative values scroll down. Required only by `action=scroll`.\", \"type\": \"number\"}, \"time\": {\"description\": \"The seconds to wait. Required only by `action=wait`.\", \"type\": \"number\"}, \"status\": {\"description\": \"The status of the task. Required only by `action=terminate`.\", \"type\": \"string\", \"enum\": [\"success\", \"failure\"]}}, \"required\": [\"action\"], \"type\": \"object\"}, \"args_format\": \"Format the arguments as a JSON object.\"}\n"
+    "</tools>\n\n"
+    "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n"
+)
+
+def _render_qwen25_tools_system(screen_width: int, screen_height: int) -> str:
+    """Safely render the Qwen2.5 tools system template without str.format.
+
+    The template contains many literal JSON braces; using str.format would treat
+    them as placeholders and raise KeyError. We only replace the explicit
+    {screen_width} and {screen_height} tokens.
+    """
+    return (
+        QWEN25_TOOLS_SYSTEM_TEMPLATE
+        .replace("{screen_width}", str(screen_width))
+        .replace("{screen_height}", str(screen_height))
+    )
+# ============================================================================
+# Helper Functions (from uitars15_v1.py)
+# ============================================================================
+
 def parse_action(action_str):
+    """Parse an action string into function name and arguments."""
     try:
-        # 解析字符串为 AST 节点
         node = ast.parse(action_str, mode='eval')
-
-        # 确保节点是一个表达式
         if not isinstance(node, ast.Expression):
             raise ValueError("Not an expression")
-
-        # 获取表达式的主体
         call = node.body
-
-        # 确保主体是一个函数调用
         if not isinstance(call, ast.Call):
             raise ValueError("Not a function call")
-
-        # 获取函数名
+        
         if isinstance(call.func, ast.Name):
             func_name = call.func.id
         elif isinstance(call.func, ast.Attribute):
             func_name = call.func.attr
         else:
             func_name = None
-
-        # 获取关键字参数
+        
         kwargs = {}
         for kw in call.keywords:
             key = kw.arg
-            # 处理不同类型的值，这里假设都是常量
             if isinstance(kw.value, ast.Constant):
                 value = kw.value.value
-            elif isinstance(kw.value, ast.Str):  # 兼容旧版本 Python
+            elif isinstance(kw.value, ast.Str):
                 value = kw.value.s
             else:
                 value = None
             kwargs[key] = value
-
-        return {
-            'function': func_name,
-            'args': kwargs
-        }
-
+        
+        return {'function': func_name, 'args': kwargs}
     except Exception as e:
         print(f"Failed to parse action '{action_str}': {e}")
         return None
-    
+
 def escape_single_quotes(text):
-    # 匹配未转义的单引号（不匹配 \\'）
+    """Escape single quotes in text."""
     pattern = r"(?<!\\)'"
     return re.sub(pattern, r"\\'", text)
 
@@ -164,48 +176,19 @@ def round_by_factor(number: int, factor: int) -> int:
     """Returns the closest integer to 'number' that is divisible by 'factor'."""
     return round(number / factor) * factor
 
-
 def ceil_by_factor(number: int, factor: int) -> int:
     """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
     return math.ceil(number / factor) * factor
 
-
 def floor_by_factor(number: int, factor: int) -> int:
     """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
-    return math.floor(number / factor) * factor    
+    return math.floor(number / factor) * factor
 
-
-def linear_resize(
-    height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
-) -> tuple[int, int]:
-    if width * height > max_pixels:
-        """
-        如果图片超过/低于像素限制，则计算一个缩放因子resize_factor，使图片的像素数缩小到等于或小于max_pixels。这个缩放因子是通过开平方根计算的，确保纵横比保持不变,这样原始的相对坐标可以不经转换直接复用
-        """
-        resize_factor = math.sqrt(max_pixels / (width * height))
-        width, height = int(width * resize_factor), int(height * resize_factor)
-    if width * height < min_pixels:
-        resize_factor = math.sqrt(min_pixels / (width * height))
-        width, height = math.ceil(width * resize_factor), math.ceil(height * resize_factor)
-
-    return height, width 
-
-def smart_resize(
-    height: int, width: int, factor: int = IMAGE_FACTOR, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS
-) -> tuple[int, int]:
-    """
-    Rescales the image so that the following conditions are met:
-
-    1. Both dimensions (height and width) are divisible by 'factor'.
-
-    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
-    3. The aspect ratio of the image is maintained as closely as possible.
-    """
+def smart_resize(height: int, width: int, factor: int = IMAGE_FACTOR, 
+                 min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS) -> Tuple[int, int]:
+    """Rescale image dimensions to meet constraints."""
     if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(
-            f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
-        )
+        raise ValueError(f"absolute aspect ratio must be smaller than {MAX_RATIO}")
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
     if h_bar * w_bar > max_pixels:
@@ -218,24 +201,32 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
     return h_bar, w_bar
 
-def parse_action_to_structure_output(text, factor, origin_resized_height, origin_resized_width, model_type, max_pixels=16384*28*28, min_pixels=100*28*28):
+def pil_to_base64(image):
+    """Convert PIL Image to base64 string."""
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+def parse_action_to_structure_output(text, factor, origin_resized_height, origin_resized_width, 
+                                     model_type, max_pixels=MAX_PIXELS, min_pixels=MIN_PIXELS):
+    """Parse model output text into structured actions."""
     text = text.strip()
     if model_type == "qwen25vl":
-        smart_resize_height, smart_resize_width = smart_resize(origin_resized_height, origin_resized_width, factor=IMAGE_FACTOR, min_pixels=min_pixels, max_pixels=max_pixels)
-
-    # 正则表达式匹配 Action 字符串
+        smart_resize_height, smart_resize_width = smart_resize(
+            origin_resized_height, origin_resized_width, 
+            factor=IMAGE_FACTOR, min_pixels=min_pixels, max_pixels=max_pixels
+        )
+    
+    # Extract thought
     if text.startswith("Thought:"):
         thought_pattern = r"Thought: (.+?)(?=\s*Action:|$)"
-        thought_hint = "Thought: "
     elif text.startswith("Reflection:"):
         thought_pattern = r"Reflection: (.+?)Action_Summary: (.+?)(?=\s*Action:|$)"
-        thought_hint = "Reflection: "
     elif text.startswith("Action_Summary:"):
         thought_pattern = r"Action_Summary: (.+?)(?=\s*Action:|$)"
-        thought_hint = "Action_Summary: "
     else:
         thought_pattern = r"Thought: (.+?)(?=\s*Action:|$)"
-        thought_hint = "Thought: "
+    
     reflection, thought = None, None
     thought_match = re.search(thought_pattern, text, re.DOTALL)
     if thought_match:
@@ -244,51 +235,40 @@ def parse_action_to_structure_output(text, factor, origin_resized_height, origin
         elif len(thought_match.groups()) == 2:
             thought = thought_match.group(2).strip()
             reflection = thought_match.group(1).strip()
-    assert "Action:" in text
+    
+    assert "Action:" in text, "No Action found in response"
     action_str = text.split("Action:")[-1]
-
+    
     tmp_all_action = action_str.split("\n\n")
     all_action = []
     for action_str in tmp_all_action:
         if "type(content" in action_str:
-            # 正则表达式匹配 content 中的字符串并转义单引号
-            def escape_quotes(match):
-                content = match.group(1)  # 获取 content 的值
-                return content
-
-            # 使用正则表达式进行替换
-            pattern = r"type\(content='(.*?)'\)"  # 匹配 type(content='...')
-            content = re.sub(pattern, escape_quotes, action_str)
-
-            # 处理字符串
+            pattern = r"type\(content='(.*?)'\)"
+            content = re.sub(pattern, lambda m: m.group(1), action_str)
             action_str = escape_single_quotes(content)
             action_str = "type(content='" + action_str + "')"
         all_action.append(action_str)
-
+    
     parsed_actions = [parse_action(action.replace("\n","\\n").lstrip()) for action in all_action]
     actions = []
     for action_instance, raw_str in zip(parsed_actions, all_action):
-        if action_instance == None:
-            print(f"Action can't parse: {raw_str}")
-            raise ValueError(f"Action can't parse: {raw_str}") 
+        if action_instance is None:
+            raise ValueError(f"Action can't parse: {raw_str}")
+        
         action_type = action_instance["function"]
         params = action_instance["args"]
-
-        # import pdb; pdb.set_trace()
+        
         action_inputs = {}
         for param_name, param in params.items():
-            if param == "": continue
-            param = param.lstrip()  # 去掉引号和多余的空格
-            # 处理start_box或者end_box参数格式 '<bbox>x1 y1 x2 y2</bbox>'
+            if param == "":
+                continue
+            param = param.lstrip()
             action_inputs[param_name.strip()] = param
             
             if "start_box" in param_name or "end_box" in param_name:
                 ori_box = param
-                # Remove parentheses and split the string by commas
                 numbers = ori_box.replace("(", "").replace(")", "").split(",")
-
-                # Convert to float and scale by 1000
-                # Qwen2.5vl output absolute coordinates, qwen2vl output relative coordinates
+                
                 if model_type == "qwen25vl":
                     float_numbers = []
                     for num_idx, num in enumerate(numbers):
@@ -299,12 +279,12 @@ def parse_action_to_structure_output(text, factor, origin_resized_height, origin
                             float_numbers.append(float(num/smart_resize_width))
                 else:
                     float_numbers = [float(num) / factor for num in numbers]
-
+                
                 if len(float_numbers) == 2:
-                    float_numbers = [float_numbers[0], float_numbers[1], float_numbers[0], float_numbers[1]]
+                    float_numbers = [float_numbers[0], float_numbers[1], 
+                                   float_numbers[0], float_numbers[1]]
                 action_inputs[param_name.strip()] = str(float_numbers)
-
-        # import pdb; pdb.set_trace()
+        
         actions.append({
             "reflection": reflection,
             "thought": thought,
@@ -314,647 +294,763 @@ def parse_action_to_structure_output(text, factor, origin_resized_height, origin
         })
     return actions
 
-def parsing_response_to_pyautogui_code(responses, image_height: int, image_width:int, input_swap:bool=True) -> str:
-    '''
-    将M模型的输出解析为OSWorld中的action，生成pyautogui代码字符串
-    参数:
-        response: 包含模型输出的字典，结构类似于：
-        {
-            "action_type": "hotkey",
-            "action_inputs": {
-                "hotkey": "v ctrl",
-                "start_box": None,
-                "end_box": None
-            }
-        }
-    返回:
-        生成的pyautogui代码字符串
-    '''
 
-    pyautogui_code = f"import pyautogui\nimport time\n"
-    if isinstance(responses, dict):
-        responses = [responses]
-    for response_id, response in enumerate(responses):
-        if "observation" in response:
-            observation = response["observation"]
+# ============================================================================
+# Evaluation Helpers and Agent Wrapper
+# ============================================================================
+
+def _split_action_strings(prediction_text: str) -> List[str]:
+    """
+    Extract raw action strings from a model response while preserving formatting.
+    """
+    if not prediction_text or "Action:" not in prediction_text:
+        return []
+
+    tail = prediction_text.split("Action:", 1)[1]
+    lines = tail.replace("\r", "").splitlines()
+    terminators = ("Thought:", "Reflection:", "Summary:", "Observation:", "Call_user", "Call User")
+    buffer: List[str] = []
+    current: List[str] = []
+
+    def flush():
+        nonlocal current
+        if current:
+            joined = " ".join(segment.strip() for segment in current if segment.strip())
+            if joined:
+                buffer.append(joined)
+        current = []
+
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            flush()
+            continue
+        if any(stripped.startswith(term) for term in terminators):
+            flush()
+            break
+        current.append(stripped)
+    flush()
+    return buffer
+
+
+def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_h: Optional[int], 
+                       model_type: str = "qwen25vl") -> Optional[Tuple[float, float]]:
+    """
+    Convert the first available start_box/end_box entry into absolute pixel coordinates.
+    
+    For qwen25vl, gta1, uitars15 model type, denormalizes using smart_resize dimensions in the same
+    alternating pattern as normalization:
+    - Index 0 (x coordinate) -> multiply by smart_resize_width
+    - Index 1 (y coordinate) -> multiply by smart_resize_height
+    
+    Raises ValueError if model_type is not 'qwen25vl' or if smart_resize dimensions are not provided.
+    """
+    candidate = None
+    for key in ("start_box", "end_box"):
+        if key in action_inputs:
+            candidate = action_inputs[key]
+            break
+    if candidate is None:
+        return None
+    try:
+        if isinstance(candidate, str):
+            coords = ast.literal_eval(candidate)
         else:
-            observation = ""
-
-        if "thought" in response:
-            thought = response["thought"]
-        else:
-            thought = ""
+            coords = candidate
+        if not isinstance(coords, (list, tuple)) or len(coords) < 2:
+            return None
         
-        if response_id == 0:
-            pyautogui_code += f"'''\nObservation:\n{observation}\n\nThought:\n{thought}\n'''\n"
-        else:
-            pyautogui_code += f"\ntime.sleep(1)\n"
+        # UITARS 1.5 only predicts 2D coordinates (x, y)
+        if model_type not in ["qwen25vl", "gta1", "uitars15"]:
+            raise ValueError(f"Expected model_type='qwen25vl', got '{model_type}'")
 
-        action_dict = response
-        action_type = action_dict.get("action_type")
-        action_inputs = action_dict.get("action_inputs", {})
-        
-        if action_type == "hotkey":
-            # Parsing hotkey action
-            if "key" in action_inputs:
-                hotkey = action_inputs.get("key", "")
-            else:
-                hotkey = action_inputs.get("hotkey", "")
+        x_raw = float(coords[0])
+        y_raw = float(coords[1])
+        # Denormalize using the same alternating pattern as normalization
+        # Index 0 (x coordinate) -> multiply by width
+        # Index 1 (y coordinate) -> multiply by height
+        x = float(x_raw * img_w)
+        y = float(y_raw * img_h)
+        return x, y
+    except Exception:
+        return None
 
-            if hotkey == "arrowleft":
-                hotkey = "left"
 
-            elif hotkey == "arrowright":
-                hotkey = "right"
-            
-            elif hotkey == "arrowup":
-                hotkey = "up"
-            
-            elif hotkey == "arrowdown":
-                hotkey = "down"
+def _point_inside_bbox(point: Tuple[float, float], bbox: Sequence[float]) -> bool:
+    x, y = point
+    if len(bbox) < 4:
+        return False
+    bx, by, bw, bh = map(float, bbox[:4])
+    return bx <= x <= bx + bw and by <= y <= by + bh
 
-            if hotkey:
-                # Handle other hotkeys
-                keys = hotkey.split()  # Split the keys by space
-                convert_keys = []
-                for key in keys:
-                    if key == "space":
-                        key = ' '
-                    convert_keys.append(key)
-                pyautogui_code += f"\npyautogui.hotkey({', '.join([repr(k) for k in convert_keys])})"
-        
-        elif action_type == "press":
-            # Parsing press action
-            if "key" in action_inputs:
-                key_to_press = action_inputs.get("key", "")
-            else:
-                key_to_press = action_inputs.get("press", "")
 
-            if hotkey == "arrowleft":
-                hotkey = "left"
+def _center_from_bbox(bbox: Sequence[float]) -> Optional[Tuple[float, float]]:
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x, y, w, h = map(float, bbox[:4])
+        return x + w / 2.0, y + h / 2.0
+    except (TypeError, ValueError):
+        return None
 
-            elif hotkey == "arrowright":
-                hotkey = "right"
-            
-            elif hotkey == "arrowup":
-                hotkey = "up"
-            
-            elif hotkey == "arrowdown":
-                hotkey = "down"
-            
-            elif hotkey == "space":
-                hotkey = " "
-                
-            if key_to_press:
-                # Simulate pressing a single key
-                pyautogui_code += f"\npyautogui.press({repr(key_to_press)})"
-            
-        elif action_type == "keyup":
-            key_to_up = action_inputs.get("key", "")
-            pyautogui_code += f"\npyautogui.keyUp({repr(key_to_up)})"
-        
-        elif action_type == "keydown":
-            key_to_down = action_inputs.get("key", "")
-            pyautogui_code += f"\npyautogui.keyDown({repr(key_to_down)})"
 
-        elif action_type == "type":
-            # Parsing typing action using clipboard
-            content = action_inputs.get("content", "")
-            content = escape_single_quotes(content)
-            stripped_content = content
-            if content.endswith("\n") or content.endswith("\\n"):
-                stripped_content = stripped_content.rstrip("\\n").rstrip("\n")
-            if content:
-                if input_swap:
-                    pyautogui_code += f"\nimport pyperclip"
-                    pyautogui_code += f"\npyperclip.copy('{stripped_content}')"
-                    pyautogui_code += f"\npyautogui.hotkey('ctrl', 'v')"
-                    pyautogui_code += f"\ntime.sleep(0.5)\n"
-                    if content.endswith("\n") or content.endswith("\\n"):
-                        pyautogui_code += f"\npyautogui.press('enter')"
-                else:
-                    pyautogui_code += f"\npyautogui.write('{stripped_content}', interval=0.1)"
-                    pyautogui_code += f"\ntime.sleep(0.5)\n"
-                    if content.endswith("\n") or content.endswith("\\n"):
-                        pyautogui_code += f"\npyautogui.press('enter')"
+def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
+    dx = p1[0] - p2[0]
+    dy = p1[1] - p2[1]
+    return dx * dx + dy * dy
 
-        
-        elif action_type in ["drag", "select"]:
-            # Parsing drag or select action based on start and end_boxes
-            start_box = action_inputs.get("start_box")
-            end_box = action_inputs.get("end_box")
-            if start_box and end_box:
-                x1, y1, x2, y2 = eval(start_box)  # Assuming box is in [x1, y1, x2, y2]
-                sx = round(float((x1 + x2) / 2) * image_width, 3)
-                sy = round(float((y1 + y2) / 2) * image_height, 3)
-                x1, y1, x2, y2 = eval(end_box)  # Assuming box is in [x1, y1, x2, y2]
-                ex = round(float((x1 + x2) / 2) * image_width, 3)
-                ey = round(float((y1 + y2) / 2) * image_height, 3)
-                pyautogui_code += (
-                    f"\npyautogui.moveTo({sx}, {sy})\n"
-                    f"\npyautogui.dragTo({ex}, {ey}, duration=1.0)\n"
-                )
-
-        elif action_type == "scroll":
-            # Parsing scroll action
-            start_box = action_inputs.get("start_box")
-            if start_box:
-                x1, y1, x2, y2 = eval(start_box)  # Assuming box is in [x1, y1, x2, y2]
-                x = round(float((x1 + x2) / 2) * image_width, 3)
-                y = round(float((y1 + y2) / 2) * image_height, 3)
-                
-                # # 先点对应区域，再滚动
-                # pyautogui_code += f"\npyautogui.click({x}, {y}, button='left')"
-            else:
-                x = None
-                y = None
-            direction = action_inputs.get("direction", "")
-            
-            if x == None:
-                if "up" in direction.lower():
-                    pyautogui_code += f"\npyautogui.scroll(5)"
-                elif "down" in direction.lower():
-                    pyautogui_code += f"\npyautogui.scroll(-5)"
-            else:
-                if "up" in direction.lower():
-                    pyautogui_code += f"\npyautogui.scroll(5, x={x}, y={y})"
-                elif "down" in direction.lower():
-                    pyautogui_code += f"\npyautogui.scroll(-5, x={x}, y={y})"
-
-        elif action_type in ["click", "left_single", "left_double", "right_single", "hover"]:
-            # Parsing mouse click actions
-            start_box = action_inputs.get("start_box")
-            start_box = str(start_box)
-            if start_box:
-                start_box = eval(start_box)
-                if len(start_box) == 4:
-                    x1, y1, x2, y2 = start_box  # Assuming box is in [x1, y1, x2, y2]
-                elif len(start_box) == 2:
-                    x1, y1 = start_box
-                    x2 = x1
-                    y2 = y1
-                x = round(float((x1 + x2) / 2) * image_width, 3)
-                y = round(float((y1 + y2) / 2) * image_height, 3)
-                if action_type == "left_single" or action_type == "click":
-                    pyautogui_code += f"\npyautogui.click({x}, {y}, button='left')"
-                elif action_type == "left_double":
-                    pyautogui_code += f"\npyautogui.doubleClick({x}, {y}, button='left')"
-                elif action_type == "right_single":
-                    pyautogui_code += f"\npyautogui.click({x}, {y}, button='right')"
-                elif action_type == "hover":
-                    pyautogui_code += f"\npyautogui.moveTo({x}, {y})"
-        
-        elif action_type in ["finished"]:
-            pyautogui_code = f"DONE"
-        
-        else:
-            pyautogui_code += f"\n# Unrecognized action type: {action_type}"
-
-    return pyautogui_code
-
-def add_box_token(input_string):
-    # Step 1: Split the string into individual actions
-    if "Action: " in input_string and "start_box=" in input_string:
-        suffix = input_string.split("Action: ")[0] + "Action: "
-        actions = input_string.split("Action: ")[1:]
-        processed_actions = []
-        for action in actions:
-            action = action.strip()
-            # Step 2: Extract coordinates (start_box or end_box) using regex
-            coordinates = re.findall(r"(start_box|end_box)='\((\d+),\s*(\d+)\)'", action)
-            
-            updated_action = action  # Start with the original action
-            for coord_type, x, y in coordinates:
-                # Convert x and y to integers
-                updated_action = updated_action.replace(f"{coord_type}='({x},{y})'", f"{coord_type}='<|box_start|>({x},{y})<|box_end|>'")
-            processed_actions.append(updated_action)
-        
-        # Step 5: Reconstruct the final string
-        final_string = suffix + "\n\n".join(processed_actions)
-    else:
-        final_string = input_string
-    return final_string
-
-def pil_to_base64(image):
-    buffer = BytesIO()
-    image.save(buffer, format="PNG")  # 你可以改成 "JPEG" 等格式
-    return base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-def linearize_accessibility_tree(accessibility_tree, platform="ubuntu"):
-
-    if platform == "ubuntu":
-        _attributes_ns = attributes_ns_ubuntu
-        _state_ns = state_ns_ubuntu
-        _component_ns = component_ns_ubuntu
-        _value_ns = value_ns_ubuntu
-    elif platform == "windows":
-        _attributes_ns = attributes_ns_windows
-        _state_ns = state_ns_windows
-        _component_ns = component_ns_windows
-        _value_ns = value_ns_windows
-    else:
-        raise ValueError("Invalid platform, must be 'ubuntu' or 'windows'")
-
-    filtered_nodes = filter_nodes(ET.fromstring(accessibility_tree), platform)
-    linearized_accessibility_tree = [
-        "tag\tname\ttext\tclass\tdescription\tposition (top-left x&y)\tsize (w&h)"
-    ]
-
-    # Linearize the accessibility tree nodes into a table format
-    for node in filtered_nodes:
-        if node.text:
-            text = (
-                node.text
-                if '"' not in node.text
-                else '"{:}"'.format(node.text.replace('"', '""'))
-            )
-
-        elif node.get("{{{:}}}class".format(class_ns_windows), "").endswith(
-            "EditWrapper"
-        ) and node.get("{{{:}}}value".format(_value_ns)):
-            node_text = node.get("{{{:}}}value".format(_value_ns), "")
-            text = (
-                node_text
-                if '"' not in node_text
-                else '"{:}"'.format(node_text.replace('"', '""'))
-            )
-        else:
-            text = '""'
-
-        linearized_accessibility_tree.append(
-            "{:}\t{:}\t{:}\t{:}\t{:}\t{:}\t{:}".format(
-                node.tag,
-                node.get("name", ""),
-                text,
-                (
-                    node.get("{{{:}}}class".format(_attributes_ns), "")
-                    if platform == "ubuntu"
-                    else node.get("{{{:}}}class".format(class_ns_windows), "")
-                ),
-                node.get("{{{:}}}description".format(_attributes_ns), ""),
-                node.get("{{{:}}}screencoord".format(_component_ns), ""),
-                node.get("{{{:}}}size".format(_component_ns), ""),
-            )
-        )
-
-    return "\n".join(linearized_accessibility_tree)
-
-def trim_accessibility_tree(linearized_accessibility_tree, max_tokens):
-    # enc = tiktoken.encoding_for_model("gpt-4")
-    # tokens = enc.encode(linearized_accessibility_tree)
-    # if len(tokens) > max_tokens:
-    #     linearized_accessibility_tree = enc.decode(tokens[:max_tokens])
-    #     linearized_accessibility_tree += "[...]\n"
-    return linearized_accessibility_tree
+def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:
+    return [action.strip() for action in actions if action and action.strip()]
 
 
 class UITARSAgent:
+    """
+    Lightweight UITARS agent wrapper that adapts episode loader output to the vLLM-style API.
+
+    This class focuses on:
+      - Building the prompt using UITARS templates from this module.
+      - Converting screenshot bytes to base64-encoded images.
+      - Maintaining a simple sliding window of past screenshots (history_n).
+      - Calling an OpenAI-compatible client and returning (prediction_text, actions).
+
+    It intentionally reuses the helper functions and prompt constants defined above,
+    rather than re-implementing the original OSWorld UITARSAgent in full.
+    """
+
     def __init__(
         self,
         model: str,
-        runtime_conf: Dict,
-        platform="ubuntu",
-        action_space="pyautogui",
-        observation_type="screenshot",
-        # observation_type can be in ["screenshot", "a11y_tree", "screenshot_a11y_tree", "som"]
-        max_trajectory_length=50,
-        a11y_tree_max_tokens=10000,
-        model_type="qwen25vl",
-        **kwargs
-    ):
+        runtime_conf: Dict[str, Any],
+        observation_type: str = "screenshot",
+        model_type: str = "qwen25vl",
+    ) -> None:
         self.model = model
-        self.platform = platform
-        self.action_space = action_space
+        self.runtime_conf = dict(runtime_conf)
         self.observation_type = observation_type
-        self.max_trajectory_length = max_trajectory_length
-        self.a11y_tree_max_tokens = a11y_tree_max_tokens
         self.model_type = model_type
-        self.runtime_conf = runtime_conf
-        self.temperature = self.runtime_conf["temperature"]
-        self.top_k = self.runtime_conf["top_k"]
-        self.top_p = self.runtime_conf["top_p"]
-        self.max_tokens = self.runtime_conf["max_tokens"]
-        self.infer_mode = self.runtime_conf["infer_mode"]
-        self.prompt_style = self.runtime_conf["prompt_style"]
-        self.input_swap = self.runtime_conf["input_swap"]
-        self.language = self.runtime_conf["language"]
-        self.max_pixels = self.runtime_conf["max_pixels"]
-        self.min_pixels = self.runtime_conf["min_pixels"]
-        self.callusr_tolerance = self.runtime_conf["callusr_tolerance"]
-        self.vlm = OpenAI(
-            base_url=os.environ['DOUBAO_API_URL'],
-            api_key=os.environ['DOUBAO_API_KEY'],
-        )
 
-        self.thoughts = []
-        self.actions = []
-        self.observations = []
-        self.history_images = []
-        self.history_responses = []
-        
-        self.prompt_action_space = UITARS_ACTION_SPACE
-        self.action_parse_res_factor = 1000
-        if self.infer_mode == "qwen2vl_user":
-            self.prompt_action_space = UITARS_CALL_USR_ACTION_SPACE
-        elif self.infer_mode == "qwen25vl_normal":
-            self.prompt_action_space = UITARS_NORMAL_ACTION_SPACE
-    
-        self.prompt_template = UITARS_USR_PROMPT_THOUGHT
-        
-        if self.prompt_style == "qwen2vl_user" or self.prompt_style == "qwen25vl_normal":
-            self.prompt_template = UITARS_USR_PROMPT_THOUGHT
+        # Core generation/config parameters
+        self.temperature: float = float(self.runtime_conf.get("temperature", 0.0))
+        self.top_p: float = float(self.runtime_conf.get("top_p", 0.9))
+        self.max_tokens: int = int(self.runtime_conf.get("max_tokens", 512))
+        self.language: str = str(self.runtime_conf.get("language", "English"))
+        self.seed: Optional[int] = self.runtime_conf.get("seed")
 
-        elif self.prompt_style == "qwen2vl_no_thought":
-            self.prompt_template = UITARS_USR_PROMPT_NOTHOUGHT
+        # Image constraints
+        self.max_pixels: int = int(self.runtime_conf.get("max_pixels", MAX_PIXELS))
+        self.min_pixels: int = int(self.runtime_conf.get("min_pixels", MIN_PIXELS))
 
-        
-        if "history_n" in self.runtime_conf:
-            self.history_n = self.runtime_conf["history_n"]
-        else:
-            self.history_n = 5
-        
-        self.cur_callusr_count = 0
+        # History control: how many past screenshots to send, including current.
+        self.history_n: int = int(self.runtime_conf.get("history_n", 5))
+        if self.history_n < 1:
+            self.history_n = 1
 
-    def reset(self, runtime_logger=None):
-        self.thoughts = []
-        self.actions = []
-        self.observations = []
-        self.history_images = []
-        self.history_responses = []
-        
+        # Sliding window of screenshot bytes (oldest first).
+        self._screenshot_history: Deque[bytes] = deque(maxlen=self.history_n)
 
-    def predict(
-        self, instruction: str, obs: Dict, last_action_after_obs: Dict = None
-    ) -> List:
+    def reset(self) -> None:
+        """Clear internal history so the next step is stateless."""
+        self._screenshot_history.clear()
+
+    def _build_messages(self, instruction: str) -> List[Dict[str, Any]]:
         """
-        Predict the next action(s) based on the current observation.
+        Build OpenAI-compatible messages with the current history of screenshots.
+
+        The user message contains:
+          - A single text entry with the UITARS prompt (including action space).
+          - One image entry per screenshot in the history, oldest to newest.
         """
+        # Switch prompt style based on runtime configuration
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
 
-        # Append trajectory
-        # print(len(self.observations), len(self.actions), len(self.actions))
-        assert len(self.observations) == len(self.actions) and len(self.actions) == len(
-            self.thoughts
-        ), "The number of observations and actions should be the same."
+        user_content: List[Dict[str, Any]] = []
+        system_text = "You are a helpful assistant."
 
-        if len(self.observations) > self.max_trajectory_length:
-            if self.max_trajectory_length == 0:
-                _observations = []
-                _actions = []
-                _thoughts = []
-            else:
-                _observations = self.observations[-self.max_trajectory_length :]
-                _actions = self.actions[-self.max_trajectory_length :]
-                _thoughts = self.thoughts[-self.max_trajectory_length :]
-        else:
-            _observations = self.observations
-            _actions = self.actions
-            _thoughts = self.thoughts
-
-
-        self.history_images.append(obs["screenshot"])
-
-        if self.observation_type in ["screenshot", "screenshot_a11y_tree"]:
-            base64_image = obs["screenshot"]
+        if prompt_style == "gta1":
+            # Determine dimensions from the latest frame if possible
+            img_w = img_h = None
             try:
-                linearized_accessibility_tree = (
-                    linearize_accessibility_tree(
-                        accessibility_tree=obs["accessibility_tree"],
-                        platform=self.platform,
-                    )
-                    if self.observation_type == "screenshot_a11y_tree"
-                    else None
-                )
-            except:
-                linearized_accessibility_tree = None
-            # logger.debug("LINEAR AT: %s", linearized_accessibility_tree)
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
 
-            if linearized_accessibility_tree:
-                linearized_accessibility_tree = trim_accessibility_tree(
-                    linearized_accessibility_tree, self.a11y_tree_max_tokens
-                )
-
-            if self.observation_type == "screenshot_a11y_tree":
-                self.observations.append(
-                    {
-                        "screenshot": base64_image,
-                        "accessibility_tree": linearized_accessibility_tree,
-                    }
-                )
+            if img_w is not None and img_h is not None:
+                system_text = GTA1_SYSTEM_PROMPT.format(height=img_h, width=img_w)
             else:
-                self.observations.append(
-                    {"screenshot": base64_image, "accessibility_tree": None}
+                # Fallback system text without explicit dimensions
+                system_text = (
+                    "You are an expert UI element locator. Given a GUI image and a user's element description, "
+                    "provide the coordinates of the specified element as a single (x,y) point. For elements with area, "
+                    "return the center point.\n\nOutput the coordinate pair exactly:\n(x,y)"
                 )
 
-        else:
-            raise ValueError(
-                "Invalid observation_type type: " + self.observation_type
-            )  # 1}}}
-        
-        if self.infer_mode == "qwen2vl_user" or self.infer_mode == "qwen25vl_normal":
-            user_prompt = self.prompt_template.format(
+            # For GTA1, the user message is only the instruction text
+            user_content.append({"type": "text", "text": instruction})
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
+            # Prepare a guided tools-style system prompt with screen dimensions
+            img_w = img_h = None
+            try:
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
+
+            if img_w is not None and img_h is not None:
+                system_text = _render_qwen25_tools_system(img_w, img_h)
+            else:
+                # Default to a generic tools prompt if we cannot infer dims
+                system_text = _render_qwen25_tools_system(1920, 1080)
+
+            # User sends instruction only; image is attached below
+            user_content.append({"type": "text", "text": instruction})
+        elif prompt_style == "uitars15_nothought":
+            prompt = UITARS_USR_PROMPT_NOTHOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
                 instruction=instruction,
-                action_space=self.prompt_action_space,
-                language=self.language
             )
-        elif self.infer_mode == "qwen2vl_no_thought":
-            user_prompt = self.prompt_template.format(
-                instruction=instruction
-            )
+            user_content.append({"type": "text", "text": prompt})
 
-        if len(self.history_images) > self.history_n:
-            self.history_images = self.history_images[-self.history_n:]
-
-        messages, images = [], []
-        if isinstance(self.history_images, bytes):
-            self.history_images = [self.history_images]
-        elif isinstance(self.history_images, np.ndarray):
-            self.history_images = list(self.history_images)
-        elif isinstance(self.history_images, list):
-            pass
         else:
-            raise TypeError(f"Unidentified images type: {type(self.history_images)}")
+            # Default UITARS prompt with action space and instruction
+            prompt = UITARS_USR_PROMPT_THOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
+                instruction=instruction,
+            )
+            user_content.append({"type": "text", "text": prompt})
 
-        for turn, image in enumerate(self.history_images):
-            if len(images) >= self.history_n:
-                break
+        # Attach each screenshot in history as an image_url.
+        for screenshot_bytes in self._screenshot_history:
             try:
-                image = Image.open(BytesIO(image))
-            except Exception as e:
-                raise RuntimeError(f"Error opening image: {e}")
+                image = Image.open(BytesIO(screenshot_bytes))
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
+            except Exception:
+                # If a particular frame cannot be decoded, skip it.
+                continue
 
-            if image.width * image.height > self.max_pixels:
-                """
-                如果图片超过/低于像素限制，则计算一个缩放因子resize_factor，使图片的像素数缩小到等于或小于max_pixels。这个缩放因子是通过开平方根计算的，确保纵横比保持不变,这样原始的相对坐标可以不经转换直接复用
-                """
-                resize_factor = math.sqrt(self.max_pixels / (image.width * image.height))
-                width, height = int(image.width * resize_factor), int(image.height * resize_factor)
-                image = image.resize((width, height))
-            if image.width * image.height < self.min_pixels:
-                resize_factor = math.sqrt(self.min_pixels / (image.width * image.height))
-                width, height = math.ceil(image.width * resize_factor), math.ceil(image.height * resize_factor)
-                image = image.resize((width, height))
+            encoded = pil_to_base64(image)
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{encoded}"},
+                }
+            )
 
-            if image.mode != "RGB":
-                image = image.convert("RGB")
-
-            images.append(image)
-
-        messages = [
+        messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}]
+                "content": [{"type": "text", "text": system_text}],
             },
             {
                 "role": "user",
-                "content": [{"type": "text", "text": user_prompt}]
-            }
+                "content": user_content,
+            },
         ]
-        
-        image_num = 0
-        if len(self.history_responses) > 0:
-            for history_idx, history_response in enumerate(self.history_responses):
-                # send at most history_n images to the model
-                if history_idx + self.history_n > len(self.history_responses):
+        return messages
 
-                    cur_image = images[image_num]
-                    encoded_string = pil_to_base64(cur_image)
-                    messages.append({
-                        "role": "user",
-                        "content": [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}]
-                    })
-                    image_num += 1
-                    
-                messages.append({
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": add_box_token(history_response)}]
-                })
+    def predict(self, instruction: str, obs: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """
+        Run one prediction step for a given instruction and observation.
 
-            cur_image = images[image_num]
-            encoded_string = pil_to_base64(cur_image)
-            messages.append({
-                "role": "user",
-                "content": [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}]
-            })
-            image_num += 1
-        
-        else:
-            cur_image = images[image_num]
-            encoded_string = pil_to_base64(cur_image)
-            messages.append({
-                "role": "user",
-                "content": [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}]
-            })
-            image_num += 1
+        Args:
+            instruction: Text instruction for this step.
+            obs: Observation dict from episode_loader, expected to contain:
+                - "screenshot": bytes
+                - "accessibility_tree": currently unused
 
-        try_times = 3
-        origin_resized_height = images[-1].height
-        origin_resized_width = images[-1].width
-        temperature = self.temperature
-        top_k = self.top_k
-        while True:
-            if try_times <= 0:
-                print(f"Reach max retry times to fetch response from client, as error flag.")
-                return "client error", ["DONE"]
+        Returns:
+            prediction_text: Raw model text response.
+            actions: List of raw UITARS action strings parsed from the response.
+        """
+        screenshot_bytes = obs.get("screenshot")
+        if not isinstance(screenshot_bytes, (bytes, bytearray)):
+            raise ValueError("obs['screenshot'] must be bytes.")
+
+        # Update sliding window with the current frame.
+        self._screenshot_history.append(bytes(screenshot_bytes))
+
+        messages = self._build_messages(instruction)
+
+        # Resolve API endpoint and key, preferring DOUBAO_* but falling back to VLLM_*.
+        api_url = os.environ.get("DOUBAO_API_URL") or os.environ.get(
+            "VLLM_API_URL", "http://localhost:8000/v1"
+        )
+        api_key = os.environ.get("DOUBAO_API_KEY") or os.environ.get(
+            "VLLM_API_KEY", "EMPTY"
+        )
+
+        client = OpenAI(base_url=api_url, api_key=api_key)
+
+        # Build request kwargs, including seed if provided
+        request_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+        }
+        if self.seed is not None:
+            request_kwargs["seed"] = self.seed
+
+        response = client.chat.completions.create(**request_kwargs)
+        prediction_text = response.choices[0].message.content.strip()
+
+        # If GTA1 or Qwen2.5 tools prompt style is used, rewrite to UITARS-style action
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
+        if prompt_style == "gta1":
             try:
-                response = self.vlm.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    frequency_penalty=1,
-                    max_tokens=self.max_tokens,
-                    temperature=temperature,
-                    top_p=self.top_p
-                )
-                print("*" * 20)
-                print("Response:")
-                print(response.choices[0].message.content)
-                print("*" * 20)
-                prediction = response.choices[0].message.content.strip()
-
-            except Exception as e:
-                logger.exception(f"Error when fetching response from client: {e}")
-                prediction = None
-                try_times -= 1
-            
+                m = re.search(r"\((-?\d*\.?\d+),\s*(-?\d*\.?\d+)\)", prediction_text)
+                if m:
+                    x_s, y_s = m.groups()
+                    # Prefer ints when applicable to match typical formatting
+                    def fmt_num(s: str) -> str:
+                        try:
+                            v = float(s)
+                            if abs(v - int(v)) < 1e-6:
+                                return str(int(v))
+                            return str(v)
+                        except Exception:
+                            return s
+                    x_out, y_out = fmt_num(x_s), fmt_num(y_s)
+                    prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+            except Exception:
+                # Leave prediction_text unchanged on parse failure
+                pass
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
             try:
-                parsed_responses = parse_action_to_structure_output(
-                    prediction,
-                    self.action_parse_res_factor,
-                    origin_resized_height,
-                    origin_resized_width,
-                    self.model_type,
-                    self.max_pixels,
-                    self.min_pixels
-                )
-                break
-            except Exception as e:
-                print(f"Error when parsing response from client: {e}")
-                # If fail to parse the model response, we use sampling parameters to avoid it
-                prediction = None
-                try_times -= 1
-                temperature = 1
-                top_k = -1
-                
-        if prediction is None:
-            return "client error", ["DONE"]
+                # Try to extract a JSON object inside <tool_call> ... </tool_call>
+                tool_json = None
+                m = re.search(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|$)", prediction_text, re.DOTALL)
+                if m:
+                    tool_json = m.group(1)
+                else:
+                    # Fallback: try to find a coordinate array in the text
+                    m2 = re.search(r"\[\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*(?:,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*))?\]", prediction_text)
+                    if m2:
+                        groups = [g for g in m2.groups() if g is not None]
+                        coords = [float(g) for g in groups]
+                        if len(coords) >= 2:
+                            if len(coords) >= 4:
+                                x1, y1, x2, y2 = coords[:4]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = coords[:2]
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
 
-        self.history_responses.append(prediction)
-        self.thoughts.append(prediction)
+                if tool_json is not None:
+                    try:
+                        payload = json.loads(tool_json)
+                        args = payload.get("arguments") or {}
+                        coord = args.get("coordinate")
+                        cx = cy = None
+                        if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                            if len(coord) >= 4:
+                                x1, y1, x2, y2 = [float(x) for x in coord[:4]]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = [float(x) for x in coord[:2]]
+                        if cx is not None and cy is not None:
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
+        # Extract raw UITARS action strings from the (possibly rewritten) response.
+        actions = _split_action_strings(prediction_text)
+        return prediction_text, actions
+
+
+def compute_step_metrics(
+    prediction_text: str,
+    screenshot_bytes: bytes,
+    metadata: Dict,
+    model_type: str = "qwen25vl",
+    max_pixels: int = MAX_PIXELS,
+    min_pixels: int = MIN_PIXELS,
+) -> Dict[str, Optional[float]]:
+    """
+    Compute per-step evaluation metrics.
+
+    Returns:
+        {
+            "action_str_em": Optional[float],
+            "hit_box_accuracy": Optional[float],
+            "bbox_center_mse": Optional[float],
+        }
+    """
+    metrics: Dict[str, Optional[float]] = OrderedDict(
+        (
+            ("action_str_em", None),
+            ("hit_box_accuracy", None),
+            ("bbox_center_mse", None),
+        )
+    )
+
+    image_w = image_h = None
+    parsed_actions: List[Dict] = []
+    predicted_point: Optional[Tuple[float, float]] = None
+    smart_resize_height = None
+    smart_resize_width = None
+
+    if screenshot_bytes:
         try:
-            parsed_responses = parse_action_to_structure_output(
-                prediction,
-                self.action_parse_res_factor,
-                origin_resized_height,
-                origin_resized_width,
-                self.model_type,
-                self.max_pixels,
-                self.min_pixels
-            )
-        except Exception as e:
-            print(f"Parsing action error: {prediction}, with error:\n{e}")
-            return f"Parsing action error: {prediction}, with error:\n{e}", ["DONE"]
+            screenshot = Image.open(BytesIO(screenshot_bytes))
+            image_w, image_h = screenshot.size
+        except Exception:
+            pass
 
-        actions = []
-        last_image = Image.open(BytesIO(self.history_images[-1]))
-        obs_image_height = last_image.height
-        obs_image_width = last_image.width
-        for parsed_response in parsed_responses:
-            if "action_type" in parsed_response:
-
-                if parsed_response["action_type"] == FINISH_WORD:
-                    self.actions.append(actions)
-
-                    return prediction, ["DONE"]
-                
-                elif parsed_response["action_type"] == WAIT_WORD:
-                    self.actions.append(actions)
-                    return prediction, ["WAIT"]
-                
-                elif parsed_response["action_type"] == ENV_FAIL_WORD:
-                    self.actions.append(actions)
-                    return prediction, ["FAIL"]
-
-                elif parsed_response["action_type"] == CALL_USER:
-                    if self.callusr_tolerance > self.cur_callusr_count:
-                        self.actions.append(actions)
-                        self.cur_callusr_count += 1
-                        return prediction, ["WAIT"]
-                    else:
-                        self.actions.append(actions)
-                        return prediction, ["FAIL"]
+    if prediction_text and image_w and image_h:
+        try:
+            # Compute smart_resize dimensions for denormalization
+            if model_type == "qwen25vl":
+                smart_resize_height, smart_resize_width = smart_resize(
+                    image_h, image_w,
+                    factor=IMAGE_FACTOR, min_pixels=min_pixels, max_pixels=max_pixels
+                )
             
-            pyautogui_code = parsing_response_to_pyautogui_code(
-                parsed_response,
-                obs_image_height,
-                obs_image_width,
-                self.input_swap
+            parsed_actions = parse_action_to_structure_output(
+                prediction_text,
+                factor=IMAGE_FACTOR,
+                origin_resized_height=image_h,
+                origin_resized_width=image_w,
+                model_type=model_type,
+                max_pixels=max_pixels,
+                min_pixels=min_pixels,
             )
-            actions.append(pyautogui_code)
+        except Exception:
+            parsed_actions = []
 
-        self.actions.append(actions)
+    ground_truth_op = metadata.get("op")
+    if ground_truth_op and parsed_actions:
+        first_action = parsed_actions[0]
+        parsed_action_type = first_action.get("action_type")
+        parsed_inputs = first_action.get("action_inputs", {})
+        
+        # Convert UITARS action type to Mind2Web op
+        predicted_op = uitars_action_to_mind2web_op(parsed_action_type, parsed_inputs)
+        
+        if predicted_op is not None:
+            gt_op_normalized = ground_truth_op.upper().strip()
+            pred_op_normalized = predicted_op.upper().strip()
+            metrics["action_str_em"] = 1.0 if gt_op_normalized == pred_op_normalized else 0.0
 
-        if len(self.history_responses) >= self.max_trajectory_length:
-            # Default to FAIL if exceed max steps
-            actions = ["FAIL"]
+    for parsed in parsed_actions:
+        candidate = _parse_start_point(
+            parsed.get("action_inputs", {}), 
+            image_w, 
+            image_h,
+            model_type=model_type,
+            smart_resize_height=smart_resize_height,
+            smart_resize_width=smart_resize_width
+        )
+        if candidate:
+            predicted_point = candidate
+            break
 
-        return prediction, actions
+    bbox = metadata.get("bounding_box")
+    coords = metadata.get("coordinates") or []
+    target_point = metadata.get("target_point") or _center_from_bbox(bbox)
+    if target_point is None and len(coords) >= 2:
+        try:
+            target_point = (float(coords[0]), float(coords[1]))
+        except (TypeError, ValueError):
+            target_point = None
+
+    if predicted_point is not None and bbox:
+        metrics["hit_box_accuracy"] = (
+            1.0 if _point_inside_bbox(predicted_point, bbox) else 0.0
+        )
+
+    if predicted_point is not None and target_point is not None:
+        metrics["bbox_center_mse"] = _mse_distance(predicted_point, target_point)
+
+    return metrics
+
+# ============================================================================
+# Main Prediction Function
+# ============================================================================
+
+def predict_action(image_path: str, instruction: str, 
+                  model: str = "ByteDance-Seed/UI-TARS-1.5-7B",
+                  api_url: str = None,
+                  api_key: str = None,
+                  temperature: float = 0.7,
+                  max_tokens: int = 2048,
+                  model_type: str = "qwen25vl",
+                  language: str = "English",
+                  max_pixels: int = MAX_PIXELS,
+                  min_pixels: int = MIN_PIXELS,
+                  output_json: bool = False) -> Dict:
+    """
+    Predict action from image and instruction.
+    
+    Args:
+        image_path: Path to image file
+        instruction: Text instruction
+        model: Model name (defaults to ByteDance-Seed/UI-TARS-1.5-7B)
+        api_url: API base URL (defaults to vLLM at http://localhost:8000/v1)
+        api_key: API key (defaults to "EMPTY" for vLLM)
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens
+        model_type: "qwen25vl" or "qwen2vl"
+        language: Language for thought output
+        max_pixels: Maximum image pixels
+        min_pixels: Minimum image pixels
+        output_json: Output as JSON
+    
+    Returns:
+        Dictionary with prediction results
+    """
+    # Load and process image
+    try:
+        image = Image.open(image_path)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+    except Exception as e:
+        raise ValueError(f"Failed to load image: {e}")
+    
+    # Resize image if needed
+    if image.width * image.height > max_pixels:
+        resize_factor = math.sqrt(max_pixels / (image.width * image.height))
+        width = int(image.width * resize_factor)
+        height = int(image.height * resize_factor)
+        image = image.resize((width, height))
+    if image.width * image.height < min_pixels:
+        resize_factor = math.sqrt(min_pixels / (image.width * image.height))
+        width = math.ceil(image.width * resize_factor)
+        height = math.ceil(image.height * resize_factor)
+        image = image.resize((width, height))
+    
+    origin_resized_height = image.height
+    origin_resized_width = image.width
+    
+    # Encode image
+    encoded_string = pil_to_base64(image)
+    
+    # Format prompt
+    prompt = UITARS_USR_PROMPT_THOUGHT.format(
+        action_space=UITARS_ACTION_SPACE,
+        language=language,
+        instruction=instruction
+    )
+    
+    # Create messages in vLLM format (OpenAI-compatible)
+    # Format matches official vLLM API:
+    # {
+    #   "role": "user",
+    #   "content": [
+    #     {"type": "text", "text": "..."},
+    #     {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+    #   ]
+    # }
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a helpful assistant."}]
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded_string}"}}
+            ]
+        }
+    ]
+    
+    # Setup API client for vLLM server
+    # vLLM serves models via OpenAI-compatible REST API at http://localhost:8000/v1/chat/completions
+    # Official command: vllm serve "ByteDance-Seed/UI-TARS-1.5-7B"
+    if api_url is None:
+        api_url = os.environ.get('VLLM_API_URL', 'http://localhost:8000/v1')
+    if api_key is None:
+        api_key = os.environ.get('VLLM_API_KEY', 'EMPTY')
+    
+    # Create OpenAI client pointing to vLLM server
+    # The client automatically appends /chat/completions to the base URL
+    client = OpenAI(base_url=api_url, api_key=api_key)
+    
+    # Call vLLM server via OpenAI-compatible API
+    # This matches the official curl format:
+    # curl -X POST "http://localhost:8000/v1/chat/completions" \
+    #   -H "Content-Type: application/json" \
+    #   --data '{"model": "ByteDance-Seed/UI-TARS-1.5-7B", "messages": [...]}'
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        prediction = response.choices[0].message.content.strip()
+    except Exception as e:
+        raise RuntimeError(
+            f"vLLM API call failed: {e}\n"
+            f"Make sure vLLM server is running: vllm serve 'ByteDance-Seed/UI-TARS-1.5-7B'\n"
+            f"API endpoint: {api_url}/chat/completions"
+        )
+    
+    # Parse prediction
+    try:
+        parsed_actions = parse_action_to_structure_output(
+            prediction,
+            factor=1000,
+            origin_resized_height=origin_resized_height,
+            origin_resized_width=origin_resized_width,
+            model_type=model_type,
+            max_pixels=max_pixels,
+            min_pixels=min_pixels
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to parse prediction: {e}\nRaw prediction: {prediction}")
+    
+    # Format output
+    result = {
+        "prediction": prediction,
+        "image_size": {"width": origin_resized_width, "height": origin_resized_height},
+        "actions": []
+    }
+    
+    for parsed_action in parsed_actions:
+        action_data = {
+            "action_type": parsed_action.get("action_type"),
+            "action_inputs": parsed_action.get("action_inputs", {}),
+            "thought": parsed_action.get("thought"),
+            "reflection": parsed_action.get("reflection")
+        }
+        result["actions"].append(action_data)
+    
+    return result
+
+# ============================================================================
+# CLI Interface
+# ============================================================================
+
+def format_coordinates(action_inputs: Dict) -> str:
+    """Format coordinates for display."""
+    coords = []
+    if "start_box" in action_inputs:
+        start_box = action_inputs["start_box"]
+        try:
+            coords_list = eval(start_box) if isinstance(start_box, str) else start_box
+            if len(coords_list) >= 2:
+                coords.append(f"Start: ({coords_list[0]:.4f}, {coords_list[1]:.4f})")
+            if len(coords_list) >= 4:
+                coords.append(f"End: ({coords_list[2]:.4f}, {coords_list[3]:.4f})")
+        except:
+            coords.append(f"Start Box: {start_box}")
+    
+    if "end_box" in action_inputs:
+        end_box = action_inputs["end_box"]
+        try:
+            coords_list = eval(end_box) if isinstance(end_box, str) else end_box
+            if len(coords_list) >= 2:
+                coords.append(f"End: ({coords_list[0]:.4f}, {coords_list[1]:.4f})")
+        except:
+            coords.append(f"End Box: {end_box}")
+    
+    return ", ".join(coords) if coords else "No coordinates"
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Standalone GUI action prediction from image and text",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python standalone_predict.py image.png "Click on the login button"
+  python standalone_predict.py image.png "Type 'hello' in the search box" --model ByteDance-Seed/UI-TARS-1.5-7B
+  python standalone_predict.py image.png "Click login" --api-url http://localhost:8000/v1 --output-json
+        """
+    )
+    parser.add_argument("image", help="Path to image file")
+    parser.add_argument("instruction", help="Text instruction")
+    parser.add_argument("--model", default="ByteDance-Seed/UI-TARS-1.5-7B", 
+                       help="Model name (default: ByteDance-Seed/UI-TARS-1.5-7B)")
+    parser.add_argument("--api-url", help="API base URL (default: http://localhost:8000/v1 for vLLM)")
+    parser.add_argument("--api-key", help="API key (default: 'EMPTY' for vLLM)")
+    parser.add_argument("--temperature", type=float, default=0.7, help="Temperature (default: 0.7)")
+    parser.add_argument("--max-tokens", type=int, default=2048, help="Max tokens (default: 2048)")
+    parser.add_argument("--model-type", default="qwen25vl", choices=["qwen25vl", "qwen2vl"],
+                       help="Model type (default: qwen25vl)")
+    parser.add_argument("--language", default="English", help="Language for thought (default: English)")
+    parser.add_argument("--output-json", action="store_true", help="Output as JSON")
+    
+    args = parser.parse_args()
+    
+    # Check image exists
+    if not os.path.exists(args.image):
+        print(f"Error: Image file not found: {args.image}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Make prediction
+    try:
+        result = predict_action(
+            image_path=args.image,
+            instruction=args.instruction,
+            model=args.model,
+            api_url=args.api_url,
+            api_key=args.api_key,
+            temperature=args.temperature,
+            max_tokens=args.max_tokens,
+            model_type=args.model_type,
+            language=args.language,
+            output_json=args.output_json
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    
+    # Output results
+    if args.output_json:
+        print(json.dumps(result, indent=2))
+    else:
+        print("=" * 80)
+        print("PREDICTION RESULT")
+        print("=" * 80)
+        print(f"\nImage Size: {result['image_size']['width']}x{result['image_size']['height']}")
+        print(f"\nRaw Prediction:\n{result['prediction']}\n")
+        print("-" * 80)
+        print("Parsed Actions:")
+        print("-" * 80)
+        
+        for i, action in enumerate(result["actions"], 1):
+            print(f"\nAction {i}:")
+            print(f"  Type: {action['action_type']}")
+            
+            if action.get("thought"):
+                print(f"  Thought: {action['thought']}")
+            if action.get("reflection"):
+                print(f"  Reflection: {action['reflection']}")
+            
+            coords_str = format_coordinates(action.get("action_inputs", {}))
+            if coords_str != "No coordinates":
+                print(f"  Coordinates: {coords_str}")
+            
+            other_params = {k: v for k, v in action.get("action_inputs", {}).items() 
+                          if k not in ["start_box", "end_box"]}
+            if other_params:
+                print(f"  Parameters: {other_params}")
+        
+        print("\n" + "=" * 80)
+
+if __name__ == "__main__":
+    main()
