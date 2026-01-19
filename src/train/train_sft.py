@@ -32,7 +32,20 @@ def find_target_linear_names(model, num_lora_modules=-1, lora_namespan_exclude=[
     if num_lora_modules > 0:
         lora_module_names = lora_module_names[-num_lora_modules:]
     if verbose:
-        rank0_print(f"Found {len(lora_module_names)} lora modules: {lora_module_names}")
+        rank0_print(f"Found {len(lora_module_names)} LoRA target modules")
+        if len(lora_module_names) <= 20:
+            # Print all if small number
+            for i, name in enumerate(lora_module_names, 1):
+                rank0_print(f"  {i:3d}. {name}")
+        else:
+            # Print first 10 and last 10 if many modules
+            rank0_print("  First 10 modules:")
+            for i, name in enumerate(lora_module_names[:10], 1):
+                rank0_print(f"  {i:3d}. {name}")
+            rank0_print(f"  ... ({len(lora_module_names) - 20} modules omitted) ...")
+            rank0_print("  Last 10 modules:")
+            for i, name in enumerate(lora_module_names[-10:], len(lora_module_names) - 9):
+                rank0_print(f"  {i:3d}. {name}")
     return lora_module_names
 
 def set_requires_grad(parameters, requires_grad):
@@ -77,7 +90,7 @@ def train():
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     use_liger = training_args.use_liger
-    if "Qwen2.5" in model_args.model_id:
+    if "Qwen2.5" in model_args.model_id or "UI-TARS" in model_args.model_id:
         # monkey patch the vision model
         replace_qwen2_5_vision()
         # It monkey patches the forward to handle mixed modality inputs.
@@ -133,7 +146,7 @@ def train():
             )
         ))
 
-    if "Qwen2.5" in model_args.model_id:
+    if "Qwen2.5" in model_args.model_id or "UI-TARS" in model_args.model_id:
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
             dtype=compute_dtype,
@@ -164,7 +177,7 @@ def train():
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
         else:
             training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
-        
+
         model.enable_input_require_grads()
 
     if training_args.bits in [4,8]:
@@ -203,6 +216,45 @@ def train():
             for name, param in model.named_parameters():
                 if "merger" in name:
                     param.requires_grad = True
+        
+        # Print LoRA configuration and parameter statistics
+        rank0_print("\n" + "="*80)
+        rank0_print("LoRA Configuration Summary")
+        rank0_print("="*80)
+        rank0_print(f"LoRA Rank: {training_args.lora_rank}")
+        rank0_print(f"LoRA Alpha: {training_args.lora_alpha}")
+        rank0_print(f"LoRA Dropout: {training_args.lora_dropout}")
+        rank0_print(f"Number of LoRA Modules: {len(peft_config.target_modules)}")
+        rank0_print(f"Excluded modules: {lora_namespan_exclude}")
+        rank0_print("\nTrainable Parameters:")
+        rank0_print("-"*80)
+        try:
+            # Use PEFT's built-in method to print trainable parameters
+            if hasattr(model, 'print_trainable_parameters'):
+                model.print_trainable_parameters()
+            else:
+                raise AttributeError("print_trainable_parameters not available")
+        except (AttributeError, Exception):
+            # Fallback: manually count parameters
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model.parameters())
+            rank0_print(f"Trainable params: {trainable_params:,} ({trainable_params/1e6:.2f}M)")
+            rank0_print(f"All params: {total_params:,} ({total_params/1e6:.2f}M)")
+            rank0_print(f"Trainable%: {100 * trainable_params / total_params:.4f}%")
+        
+        # Count LoRA parameters by module type
+        rank0_print("\nLoRA Modules Breakdown:")
+        rank0_print("-"*80)
+        module_types = {}
+        for module_name in peft_config.target_modules:
+            # Extract module type (e.g., 'q_proj', 'gate_proj', etc.)
+            parts = module_name.split('.')
+            module_type = parts[-1] if parts else module_name
+            module_types[module_type] = module_types.get(module_type, 0) + 1
+        
+        for module_type, count in sorted(module_types.items()):
+            rank0_print(f"  {module_type:20s}: {count:3d} modules")
+        rank0_print("="*80 + "\n")
 
     processor = AutoProcessor.from_pretrained(model_args.model_id)
 
@@ -224,7 +276,8 @@ def train():
 
     data_module = make_supervised_data_module(model_id=model_args.model_id,
                                               processor=processor,
-                                              data_args=data_args)
+                                              data_args=data_args,
+                                              training_seed=training_args.seed)
 
     trainer = QwenSFTTrainer(
         model=model,
@@ -232,6 +285,18 @@ def train():
         args=training_args,
         **data_module
     )
+
+    # Run initial evaluation before training starts (baseline metrics)
+    # Skip if SKIP_INITIAL_EVAL env var is set or if resuming from checkpoint
+    skip_initial_eval = os.getenv("SKIP_INITIAL_EVAL", "false").lower() == "true"
+    has_checkpoint = list(pathlib.Path(training_args.output_dir).glob("checkpoint-*"))
+    
+    if data_module.get("eval_dataset") is not None and not skip_initial_eval and not has_checkpoint:
+        rank0_print("Running initial evaluation before training...")
+        initial_eval_metrics = trainer.evaluate()
+        rank0_print(f"Initial evaluation metrics: {initial_eval_metrics}")
+    elif skip_initial_eval:
+        rank0_print("Skipping initial evaluation (SKIP_INITIAL_EVAL=true)")
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         trainer.train(resume_from_checkpoint=True)

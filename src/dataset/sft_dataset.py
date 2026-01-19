@@ -1,5 +1,6 @@
 import copy
 import os
+import random
 from typing import Dict
 import torch
 import transformers
@@ -30,12 +31,28 @@ class SupervisedDataset(Dataset):
         data_args: DataArguments,
         model_id,
         padding=True,
+        is_training=True,
+        shuffle_seed=None,
     ):
         super(SupervisedDataset, self).__init__()
         if isinstance(data_path, str):
             list_data_dict = json.load(open(data_path, "r"))
         else:
             list_data_dict = data_path
+
+        # Limit dataset size if max_train_samples is specified (only for training data)
+        if is_training and hasattr(data_args, 'max_train_samples') and data_args.max_train_samples is not None:
+            original_size = len(list_data_dict)
+            if original_size > data_args.max_train_samples:
+                # Shuffle before limiting to ensure random subset (not just first N samples)
+                # Use provided seed for reproducibility
+                if shuffle_seed is not None:
+                    random.seed(shuffle_seed)
+                list_data_dict = list(list_data_dict)  # Make a copy to avoid modifying original
+                random.shuffle(list_data_dict)
+                list_data_dict = list_data_dict[:data_args.max_train_samples]
+                seed_info = f" (seed={shuffle_seed})" if shuffle_seed is not None else ""
+                print(f"Shuffled and limited training dataset from {original_size} to {len(list_data_dict)} samples (max_train_samples={data_args.max_train_samples}{seed_info})")
 
         self.model_id = model_id
         self.processor = processor
@@ -261,18 +278,36 @@ class DataCollatorForSupervisedDataset(object):
 
         return data_dict
 
-def make_supervised_data_module(model_id, processor, data_args):
-    """Make dataset and collator for supervised fine-tuning."""
+def make_supervised_data_module(model_id, processor, data_args, training_seed=None):
+    """Make dataset and collator for supervised fine-tuning.
+    
+    Args:
+        model_id: Model identifier
+        processor: Processor for tokenization
+        data_args: Data arguments
+        training_seed: Optional training seed for reproducible shuffling when limiting samples
+    """
+    # Pass seed to dataset for reproducible shuffling
+    if hasattr(data_args, 'seed'):
+        dataset_seed = data_args.seed
+    else:
+        dataset_seed = training_seed
+    
     sft_dataset = SupervisedDataset(
-        data_path=data_args.data_path, processor=processor, data_args=data_args, model_id=model_id
+        data_path=data_args.data_path, processor=processor, data_args=data_args, model_id=model_id, is_training=True, shuffle_seed=dataset_seed
     )
     eval_dataset = None
     if data_args.eval_path is not None:
+        # Create a copy of data_args for eval dataset to use eval_image_folder if provided
+        eval_data_args = copy.deepcopy(data_args)
+        if hasattr(data_args, 'eval_image_folder') and data_args.eval_image_folder is not None:
+            eval_data_args.image_folder = data_args.eval_image_folder
         eval_dataset = SupervisedDataset(
               data_path=data_args.eval_path,
               processor=processor,
-              data_args=data_args,
-              model_id=model_id
+              data_args=eval_data_args,
+              model_id=model_id,
+              is_training=False
           )
         
     data_collator = DataCollatorForSupervisedDataset(pad_token_id=processor.tokenizer.pad_token_id)
