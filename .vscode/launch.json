@@ -1,0 +1,29 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        },
+        {
+            "name": "Debug: prepare_mind2web_data.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/prepare_mind2web_data.py",
+            "console": "integratedTerminal",
+            "args": [
+                "${env:HOME}/Downloads/test_splits",
+                "original"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
