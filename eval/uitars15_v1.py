@@ -70,6 +70,7 @@ UITARS_USR_PROMPT_THOUGHT = """You are a GUI agent. You are given a task and you
 
 ## Output Format
 ```
+Thought: ...
 Action: ...
 ```
 
@@ -95,6 +96,40 @@ Action: ...
 {instruction}
 """
 
+# GTA1-style system prompt: instruct model to return a single coordinate pair
+GTA1_SYSTEM_PROMPT = (
+    "You are an expert UI element locator. "
+    "Given a GUI image and a user's element description, provide the coordinates of the specified element as a single (x,y) point. "
+    "The image resolution is height {height} and width {width}. For elements with area, return the center point.\n\n"
+    "Output the coordinate pair exactly:\n(x,y)"
+)
+
+# Qwen2.5-VL "tools"-style system prompt template. Follows the guided function-calling
+# pattern and includes screen width/height placeholders.
+QWEN25_TOOLS_SYSTEM_TEMPLATE = (
+    "You are a helpful assistant.\n\n\n"
+    "# Tools\n\n"
+    "You may call one or more functions to assist with the user query.\n\n"
+    "You are provided with function signatures within <tools></tools> XML tags:\n"
+    "<tools>\n"
+    "{\"type\": \"function\", \"function\": {\"name_for_human\": \"computer_use\", \"name\": \"computer_use\", \"description\": \"Use a mouse and keyboard to interact with a computer, and take screenshots.\\n* This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.\\n* Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions. E.g. if you click on Firefox and a window doesn't open, try wait and taking another screenshot.\\n* The screen's resolution is {screen_width}x{screen_height}.\\n* Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.\\n* If you tried clicking on a program or link but it failed to load, even after waiting, try adjusting your cursor position so that the tip of the cursor visually falls on the element that you want to click.\\n* Make sure to click any buttons, links, icons, etc with the cursor tip in the center of the element. Don't click boxes on their edges unless asked.\", \"parameters\": {\"properties\": {\"action\": {\"description\": \"The action to perform. The available actions are:\\n* `key`: Performs key down presses on the arguments passed in order, then performs key releases in reverse order.\\n* `type`: Type a string of text on the keyboard.\\n* `mouse_move`: Move the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `left_click`: Click the left mouse button.\\n* `left_click_drag`: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.\\n* `right_click`: Click the right mouse button.\\n* `middle_click`: Click the middle mouse button.\\n* `double_click`: Double-click the left mouse button.\\n* `scroll`: Performs a scroll of the mouse scroll wheel.\\n* `wait`: Wait specified seconds for the change to happen.\\n* `terminate`: Terminate the current task and report its completion status.\", \"enum\": [\"key\", \"type\", \"mouse_move\", \"left_click\", \"left_click_drag\", \"right_click\", \"middle_click\", \"double_click\", \"scroll\", \"wait\", \"terminate\"], \"type\": \"string\"}, \"keys\": {\"description\": \"Required only by `action=key`.\", \"type\": \"array\"}, \"text\": {\"description\": \"Required only by `action=type`.\", \"type\": \"string\"}, \"coordinate\": {\"description\": \"(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates to move the mouse to. Required only by `action=mouse_move` and `action=left_click_drag`.\", \"type\": \"array\"}, \"pixels\": {\"description\": \"The amount of scrolling to perform. Positive values scroll up, negative values scroll down. Required only by `action=scroll`.\", \"type\": \"number\"}, \"time\": {\"description\": \"The seconds to wait. Required only by `action=wait`.\", \"type\": \"number\"}, \"status\": {\"description\": \"The status of the task. Required only by `action=terminate`.\", \"type\": \"string\", \"enum\": [\"success\", \"failure\"]}}, \"required\": [\"action\"], \"type\": \"object\"}, \"args_format\": \"Format the arguments as a JSON object.\"}\n"
+    "</tools>\n\n"
+    "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n"
+    "<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n"
+)
+
+def _render_qwen25_tools_system(screen_width: int, screen_height: int) -> str:
+    """Safely render the Qwen2.5 tools system template without str.format.
+
+    The template contains many literal JSON braces; using str.format would treat
+    them as placeholders and raise KeyError. We only replace the explicit
+    {screen_width} and {screen_height} tokens.
+    """
+    return (
+        QWEN25_TOOLS_SYSTEM_TEMPLATE
+        .replace("{screen_width}", str(screen_width))
+        .replace("{screen_height}", str(screen_height))
+    )
 # ============================================================================
 # Helper Functions (from uitars15_v1.py)
 # ============================================================================
@@ -299,12 +334,11 @@ def _split_action_strings(prediction_text: str) -> List[str]:
 
 
 def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_h: Optional[int], 
-                       model_type: str = "qwen25vl", smart_resize_height: Optional[int] = None, 
-                       smart_resize_width: Optional[int] = None) -> Optional[Tuple[float, float]]:
+                       model_type: str = "qwen25vl") -> Optional[Tuple[float, float]]:
     """
     Convert the first available start_box/end_box entry into absolute pixel coordinates.
     
-    For qwen25vl model type, denormalizes using smart_resize dimensions in the same
+    For qwen25vl, gta1, uitars15 model type, denormalizes using smart_resize dimensions in the same
     alternating pattern as normalization:
     - Index 0 (x coordinate) -> multiply by smart_resize_width
     - Index 1 (y coordinate) -> multiply by smart_resize_height
@@ -326,23 +360,17 @@ def _parse_start_point(action_inputs: Dict[str, str], img_w: Optional[int], img_
         if not isinstance(coords, (list, tuple)) or len(coords) < 2:
             return None
         
-        # For qwen25vl, use smart_resize denormalization logic
         # UITARS 1.5 only predicts 2D coordinates (x, y)
-        if model_type != "qwen25vl":
+        if model_type not in ["qwen25vl", "gta1", "uitars15"]:
             raise ValueError(f"Expected model_type='qwen25vl', got '{model_type}'")
-        if smart_resize_height is None or smart_resize_width is None:
-            raise ValueError(
-                f"smart_resize_height and smart_resize_width must be provided for model_type='qwen25vl'. "
-                f"Got smart_resize_height={smart_resize_height}, smart_resize_width={smart_resize_width}"
-            )
-        
+
         x_raw = float(coords[0])
         y_raw = float(coords[1])
         # Denormalize using the same alternating pattern as normalization
         # Index 0 (x coordinate) -> multiply by width
         # Index 1 (y coordinate) -> multiply by height
-        x = float(x_raw * smart_resize_width)
-        y = float(y_raw * smart_resize_height)
+        x = float(x_raw * img_w)
+        y = float(y_raw * img_h)
         return x, y
     except Exception:
         return None
@@ -369,8 +397,7 @@ def _center_from_bbox(bbox: Sequence[float]) -> Optional[Tuple[float, float]]:
 def _mse_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     dx = p1[0] - p2[0]
     dy = p1[1] - p2[1]
-    return (dx * dx + dy * dy)
-
+    return dx * dx + dy * dy
 
 def _normalize_action_sequence(actions: Sequence[str]) -> List[str]:
     return [action.strip() for action in actions if action and action.strip()]
@@ -433,14 +460,74 @@ class UITARSAgent:
           - A single text entry with the UITARS prompt (including action space).
           - One image entry per screenshot in the history, oldest to newest.
         """
-        # Format textual prompt with action space and instruction.
-        prompt = UITARS_USR_PROMPT_THOUGHT.format(
-            action_space=UITARS_ACTION_SPACE,
-            language=self.language,
-            instruction=instruction,
-        )
+        # Switch prompt style based on runtime configuration
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
 
-        user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        user_content: List[Dict[str, Any]] = []
+        system_text = "You are a helpful assistant."
+
+        if prompt_style == "gta1":
+            # Determine dimensions from the latest frame if possible
+            img_w = img_h = None
+            try:
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
+
+            if img_w is not None and img_h is not None:
+                system_text = GTA1_SYSTEM_PROMPT.format(height=img_h, width=img_w)
+            else:
+                # Fallback system text without explicit dimensions
+                system_text = (
+                    "You are an expert UI element locator. Given a GUI image and a user's element description, "
+                    "provide the coordinates of the specified element as a single (x,y) point. For elements with area, "
+                    "return the center point.\n\nOutput the coordinate pair exactly:\n(x,y)"
+                )
+
+            # For GTA1, the user message is only the instruction text
+            user_content.append({"type": "text", "text": instruction})
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
+            # Prepare a guided tools-style system prompt with screen dimensions
+            img_w = img_h = None
+            try:
+                if len(self._screenshot_history) > 0:
+                    latest = self._screenshot_history[-1]
+                    image = Image.open(BytesIO(latest))
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    img_w, img_h = image.size
+            except Exception:
+                img_w = img_h = None
+
+            if img_w is not None and img_h is not None:
+                system_text = _render_qwen25_tools_system(img_w, img_h)
+            else:
+                # Default to a generic tools prompt if we cannot infer dims
+                system_text = _render_qwen25_tools_system(1920, 1080)
+
+            # User sends instruction only; image is attached below
+            user_content.append({"type": "text", "text": instruction})
+        elif prompt_style == "uitars15_nothought":
+            prompt = UITARS_USR_PROMPT_NOTHOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
+                instruction=instruction,
+            )
+            user_content.append({"type": "text", "text": prompt})
+
+        else:
+            # Default UITARS prompt with action space and instruction
+            prompt = UITARS_USR_PROMPT_THOUGHT.format(
+                action_space=UITARS_ACTION_SPACE,
+                language=self.language,
+                instruction=instruction,
+            )
+            user_content.append({"type": "text", "text": prompt})
 
         # Attach each screenshot in history as an image_url.
         for screenshot_bytes in self._screenshot_history:
@@ -463,7 +550,7 @@ class UITARSAgent:
         messages: List[Dict[str, Any]] = [
             {
                 "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                "content": [{"type": "text", "text": system_text}],
             },
             {
                 "role": "user",
@@ -519,7 +606,74 @@ class UITARSAgent:
         response = client.chat.completions.create(**request_kwargs)
         prediction_text = response.choices[0].message.content.strip()
 
-        # Extract raw UITARS action strings from the response.
+        # If GTA1 or Qwen2.5 tools prompt style is used, rewrite to UITARS-style action
+        prompt_style = str(self.runtime_conf.get("prompt_style", "qwen25vl_normal")).lower()
+        if prompt_style == "gta1":
+            try:
+                m = re.search(r"\((-?\d*\.?\d+),\s*(-?\d*\.?\d+)\)", prediction_text)
+                if m:
+                    x_s, y_s = m.groups()
+                    # Prefer ints when applicable to match typical formatting
+                    def fmt_num(s: str) -> str:
+                        try:
+                            v = float(s)
+                            if abs(v - int(v)) < 1e-6:
+                                return str(int(v))
+                            return str(v)
+                        except Exception:
+                            return s
+                    x_out, y_out = fmt_num(x_s), fmt_num(y_s)
+                    prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+            except Exception:
+                # Leave prediction_text unchanged on parse failure
+                pass
+        elif prompt_style in ("qwen25_tools", "qwen2.5_tools", "qwen25vl_tools"):
+            try:
+                # Try to extract a JSON object inside <tool_call> ... </tool_call>
+                tool_json = None
+                m = re.search(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|$)", prediction_text, re.DOTALL)
+                if m:
+                    tool_json = m.group(1)
+                else:
+                    # Fallback: try to find a coordinate array in the text
+                    m2 = re.search(r"\[\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*(?:,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*))?\]", prediction_text)
+                    if m2:
+                        groups = [g for g in m2.groups() if g is not None]
+                        coords = [float(g) for g in groups]
+                        if len(coords) >= 2:
+                            if len(coords) >= 4:
+                                x1, y1, x2, y2 = coords[:4]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = coords[:2]
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+
+                if tool_json is not None:
+                    try:
+                        payload = json.loads(tool_json)
+                        args = payload.get("arguments") or {}
+                        coord = args.get("coordinate")
+                        cx = cy = None
+                        if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                            if len(coord) >= 4:
+                                x1, y1, x2, y2 = [float(x) for x in coord[:4]]
+                                cx = (x1 + x2) / 2.0
+                                cy = (y1 + y2) / 2.0
+                            else:
+                                cx, cy = [float(x) for x in coord[:2]]
+                        if cx is not None and cy is not None:
+                            x_out = str(int(cx)) if abs(cx - int(cx)) < 1e-6 else str(cx)
+                            y_out = str(int(cy)) if abs(cy - int(cy)) < 1e-6 else str(cy)
+                            prediction_text = f"Action: click(start_box='({x_out},{y_out})')"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Extract raw UITARS action strings from the (possibly rewritten) response.
         actions = _split_action_strings(prediction_text)
         return prediction_text, actions
 

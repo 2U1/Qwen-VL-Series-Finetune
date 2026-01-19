@@ -5,24 +5,10 @@
     "version": "0.2.0",
     "configurations": [
       {
-        "name": "Python Debugger: Current File",
+        "name": "List presets",
         "type": "debugpy",
         "request": "launch",
-        "program": "${file}",
-        "console": "integratedTerminal",
-        "python": "${workspaceFolder}/.venv/bin/python",
-        "env": {
-          "PYTHONPATH": "${workspaceFolder}",
-          "DEBUG": "True"
-        },
-        "cwd": "${workspaceFolder}",
-        "justMyCode": true
-      },
-      {
-        "name": "UITARS15 Runner",
-        "type": "debugpy",
-        "request": "launch",
-        "module": "eval.uitars15_runner",
+        "module": "eval.gui_perturbed_evaluator",
         "console": "integratedTerminal",
         "python": "${workspaceFolder}/.venv/bin/python",
         "env": {
@@ -32,16 +18,349 @@
         "cwd": "${workspaceFolder}",
         "justMyCode": true,
         "args": [
-          "--base_dir",
-          "/mnt/test_splits",
-          "--model",
-          "ByteDance-Seed/UI-TARS-1.5-7B",
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--list_presets"
+        ]
+      },
+      {
+        "name": "GTA1 no reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
           "--seed",
           "42",
-          "--instruction_source",
-          "csv_single_instruction",
-          "--csv_instructions",
-          "/mnt/test_split_metadata.csv"
+          "--config_id",
+          "gta1_no_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "GTA1 reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "gta1_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "GTA1 no reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "gta1_no_reasoning_relational_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "GTA1 reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "gta1_reasoning_relational_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "Qwen25VL no reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "qwen25vl_no_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "Qwen25VL reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "qwen25vl_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "Qwen25VL no reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "qwen25vl_no_reasoning_relational_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "Qwen25VL reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "qwen25vl_reasoning_relational_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "UITARS15 no reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "uitars15_no_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "UITARS15 reasoning direct query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "uitars15_reasoning_direct_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "UITARS15 no reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "uitars15_no_reasoning_relational_query",
+          "--save_interval",
+          "1"
+        ]
+      },
+      {
+        "name": "UITARS15 reasoning relational query",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "eval.gui_perturbed_evaluator",
+        "console": "integratedTerminal",
+        "python": "${workspaceFolder}/.venv/bin/python",
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "DEBUG": "True"
+        },
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "args": [
+          "--csv_path",
+          "variant_data_cleaned.csv",
+          "--screenshots_base_dir",
+          "/mnt/test_splits/",
+          "--output_dir",
+          "/mnt/baseline_results/",
+          "--seed",
+          "42",
+          "--config_id",
+          "uitars15_reasoning_relational_query",
+          "--save_interval",
+          "1"
         ]
       }
     ]

@@ -30,6 +30,8 @@ from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 import pandas as pd
 from tqdm import tqdm
@@ -89,6 +91,16 @@ def parse_args() -> argparse.Namespace:
             "from the sorted list of available episodes."
         ),
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help=(
+            "Number of episodes to evaluate in parallel within this process. "
+            "Each episode is still processed step-by-step, but multiple episodes "
+            "can be evaluated concurrently. Default: 1 (no parallelism)."
+        ),
+    )
     parser.add_argument("--model", type=str, required=True, help="Model name/id for the OpenAI-compatible endpoint.")
     parser.add_argument(
         "--instruction_source",
@@ -120,9 +132,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--reset_each_step",
+        dest="reset_each_step",
         action="store_true",
-        help="If set, reset agent state before each step (stateless per-step prompts).",
+        help="Reset agent state before each step (stateless per-step prompts).",
     )
+    parser.add_argument(
+        "--no-reset_each_step",
+        dest="reset_each_step",
+        action="store_false",
+        help="Do not reset agent state between steps (allows history across steps).",
+    )
+    # Default to resetting between steps (stateless per-step prompts)
+    parser.set_defaults(reset_each_step=True)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_k", type=int, default=-1)
     parser.add_argument("--top_p", type=float, default=0.9)
@@ -139,6 +160,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-input_swap", dest="input_swap", action="store_false")
     parser.set_defaults(input_swap=True)
     parser.add_argument("--callusr_tolerance", type=int, default=3)
+    parser.add_argument(
+        "--continue_on_error",
+        action="store_true",
+        help="If set, continue evaluating remaining steps/episodes even if prediction fails for one step.",
+    )
     parser.add_argument(
         "--output_jsonl",
         type=str,
@@ -247,12 +273,27 @@ def main() -> None:
     if args.summary_json is None:
         args.summary_json = str(output_root / "uitars_summary.json")
 
-    # Configure basic logging if the root logger has no handlers yet.
-    if not logging.getLogger().handlers:
+    # Configure logging: always attach a file handler under output_root,
+    # and also log to stderr if no handlers are configured yet.
+    log_path = output_root / "uitars_eval.log"
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(log_path, encoding="utf-8"),
+            ],
         )
+    else:
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+        )
+        file_handler.setFormatter(formatter)
+        root_logger.addHandler(file_handler)
 
     # Load CSV instructions if using CSV source
     csv_instruction_lookup: Optional[Dict[Tuple[str, int], str]] = None
@@ -264,12 +305,6 @@ def main() -> None:
         logger.info("Loaded %d entries from CSV", len(csv_instruction_lookup))
 
     runtime_conf = build_runtime_conf(args)
-    agent = UITARSAgent(
-        model=args.model,
-        runtime_conf=runtime_conf,
-        observation_type=args.observation_type,
-        model_type="qwen25vl",
-    )
 
     episode_summaries: List[Dict[str, Any]] = []
     # Global aggregators across all processed episodes/steps.
@@ -277,6 +312,10 @@ def main() -> None:
     global_metric_counts: Dict[str, int] = defaultdict(int)
     global_num_steps: int = 0
     global_num_episodes: int = 0
+
+    # Locks to protect shared writers and global aggregators when using concurrency.
+    io_lock: Lock = Lock()
+    summary_lock: Lock = Lock()
 
     jsonl_file: Optional[Any] = None
     if args.output_jsonl is not None:
@@ -306,8 +345,17 @@ def main() -> None:
         nonlocal global_num_steps
         nonlocal global_num_episodes
         nonlocal predictions_root
+        nonlocal io_lock
+        nonlocal summary_lock
 
         logger.info("Evaluating episode '%s'", ep_dir.name)
+        # Create a fresh agent per-episode to avoid shared mutable state across threads
+        agent = UITARSAgent(
+            model=args.model,
+            runtime_conf=runtime_conf,
+            observation_type=args.observation_type,
+            model_type="qwen25vl",
+        )
         agent.reset()
 
         # Aggregators
@@ -351,11 +399,16 @@ def main() -> None:
                         "metadata": metadata,
                     }
                     if jsonl_file is not None:
-                        jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                        jsonl_file.flush()
-                    episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    episode_pred_file.flush()
-                    raise
+                        with io_lock:
+                            jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            jsonl_file.flush()
+                    with io_lock:
+                        episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        episode_pred_file.flush()
+                    if not args.continue_on_error:
+                        raise
+                    # Skip this step and continue to the next one
+                    continue
                 
                 # Compute metrics per step
                 try:
@@ -371,24 +424,21 @@ def main() -> None:
                     metrics = {key: None for key in STEP_METRIC_KEYS}
 
                 is_terminal = False
-                if prediction == "client error" or actions in [["DONE"], ["FAIL"]]:
+                # Check for terminal conditions:
+                # - "client error" in prediction text
+                # - Any action contains "finished()" indicating task completion
+                if prediction == "client error":
                     is_terminal = True
-                    if prediction == "client error":
-                        logger.warning(
-                            "Client error at episode=%s step=%d", ep_dir.name, step_index
-                        )
-                    elif actions == ["DONE"]:
-                        logger.info(
-                            "Task completed at episode=%s step=%d",
-                            ep_dir.name,
-                            step_index,
-                        )
-                    elif actions == ["FAIL"]:
-                        logger.info(
-                            "Task failed at episode=%s step=%d",
-                            ep_dir.name,
-                            step_index,
-                        )
+                    logger.warning(
+                        "Client error at episode=%s step=%d", ep_dir.name, step_index
+                    )
+                elif any("finished()" in action for action in actions):
+                    is_terminal = True
+                    logger.info(
+                        "Task marked as finished at episode=%s step=%d",
+                        ep_dir.name,
+                        step_index,
+                    )
                 metric_parts = []
                 for key in STEP_METRIC_KEYS:
                     value = metrics.get(key)
@@ -413,10 +463,12 @@ def main() -> None:
                     "metadata": metadata,
                 }
                 if jsonl_file is not None:
-                    jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    jsonl_file.flush()
-                episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                episode_pred_file.flush()
+                    with io_lock:
+                        jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        jsonl_file.flush()
+                with io_lock:
+                    episode_pred_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    episode_pred_file.flush()
 
                 if metrics_file is not None:
                     mrec = {
@@ -430,21 +482,23 @@ def main() -> None:
                         "screenshot_path": metadata.get("screenshot_path"),
                         "metrics": metrics,
                     }
-                    metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
-                    metrics_file.flush()
+                    with io_lock:
+                        metrics_file.write(json.dumps(mrec, ensure_ascii=False) + "\n")
+                        metrics_file.flush()
 
                 for key, value in metrics.items():
                     if value is None:
                         continue
                     metric_totals[key] += float(value)
                     metric_counts[key] += 1
-                    global_metric_totals[key] += float(value)
-                    global_metric_counts[key] += 1
+                    with summary_lock:
+                        global_metric_totals[key] += float(value)
+                        global_metric_counts[key] += 1
 
                 # Count every processed step once for global statistics,
                 # regardless of how many metrics are defined for it.
-                global_num_steps += 1
-                                
+                with summary_lock:
+                    global_num_steps += 1
                 # Collect step data for summary
                 step_data.append({
                     "step_index": step_index,
@@ -453,7 +507,6 @@ def main() -> None:
                     "prediction": prediction,
                     "screenshot_path": metadata.get("screenshot_path"),
                 })
-
                 if is_terminal:
                     logger.info(
                         "Stopping evaluation for episode=%s due to terminal state.",
@@ -493,8 +546,9 @@ def main() -> None:
             else:
                 avg = metric_totals[key] / count
                 episode_summary["metrics"][key] = {"mean": avg, "count": count}
-        episode_summaries.append(episode_summary)
-        global_num_episodes += 1
+        with summary_lock:
+            episode_summaries.append(episode_summary)
+            global_num_episodes += 1
 
     if args.episode_dir:
         episode_dir = Path(args.episode_dir)
@@ -515,8 +569,20 @@ def main() -> None:
                 "Restricting evaluation to first %d episode(s) after sorting.",
                 len(episode_dirs),
             )
-        for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
-            evaluate_one_episode(ep)
+        if args.concurrency <= 1:
+            for ep in tqdm(episode_dirs, desc="Episodes", unit="episode"):
+                evaluate_one_episode(ep)
+        else:
+            logger.info("Running with concurrency=%d over %d episode(s).", args.concurrency, len(episode_dirs))
+            with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+                list(
+                    tqdm(
+                        executor.map(evaluate_one_episode, episode_dirs),
+                        total=len(episode_dirs),
+                        desc="Episodes",
+                        unit="episode",
+                    )
+                )
     elif args.base_dir:
         base_dir = Path(args.base_dir)
         run_dirs = list(_iter_run_dirs(base_dir))
@@ -648,5 +714,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
