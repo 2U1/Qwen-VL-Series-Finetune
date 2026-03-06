@@ -104,7 +104,7 @@ dependencies:
       - joblib==1.5.2
       - jupyterlab-widgets==3.0.14
       - kiwisolver==1.4.9
-      - liger-kernel==0.6.4
+      - liger-kernel==0.7.0
       - markdown-it-py==3.0.0
       - markupsafe==2.1.5
       - matplotlib==3.10.6
