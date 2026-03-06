@@ -5,6 +5,7 @@ from pathlib import Path
 import torch.nn.functional as F
 from typing import Union
 
+import trl.import_utils as trl_import_utils
 from transformers.trainer import (
     is_sagemaker_mp_enabled,
     get_parameter_names,
@@ -17,6 +18,19 @@ from transformers.trainer import (
 from transformers.pytorch_utils import (
     ALL_LAYERNORM_LAYERS
 )
+
+
+def _normalize_trl_optional_flags():
+    for name in dir(trl_import_utils):
+        if not (name.startswith("_") and name.endswith("_available")):
+            continue
+        value = getattr(trl_import_utils, name)
+        if isinstance(value, tuple):
+            setattr(trl_import_utils, name, value[0])
+
+
+_normalize_trl_optional_flags()
+
 from trl import DPOTrainer
 from trl.trainer.utils import pad_to_length, flush_left, selective_log_softmax
 from train.train_utils import get_peft_state_non_lora_maybe_zero_3
@@ -58,6 +72,10 @@ class QwenDPOTrainer(DPOTrainer):
 
         concatenated_batch['prompt_input_ids'] = torch.cat([batch["prompt_input_ids"], batch["prompt_input_ids"]], dim=0)
         concatenated_batch['prompt_attention_mask'] = torch.cat([batch["prompt_attention_mask"], batch["prompt_attention_mask"]], dim=0)
+        if "prompt_mm_token_type_ids" in batch:
+            concatenated_batch["prompt_mm_token_type_ids"] = torch.cat(
+                [batch["prompt_mm_token_type_ids"], batch["prompt_mm_token_type_ids"]], dim=0
+            )
 
         if 'pixel_values' in batch:
             concatenated_batch['pixel_values'] = torch.cat([batch["pixel_values"], batch["pixel_values"]], dim=0)
@@ -71,10 +89,8 @@ class QwenDPOTrainer(DPOTrainer):
                 [batch["video_grid_thw"], batch["video_grid_thw"]], dim=0
             )
 
-        if 'second_grid_ts' in batch:
-            concatenated_batch['second_grid_ts'] = torch.cat(
-                [batch["second_grid_ts"], batch["second_grid_ts"]], dim=0
-            )
+        if "second_per_grid_ts" in batch:
+            concatenated_batch["second_per_grid_ts"] = batch["second_per_grid_ts"] + batch["second_per_grid_ts"]
 
         max_completion_length = max(batch["chosen_input_ids"].shape[1], batch["rejected_input_ids"].shape[1])
 
@@ -113,13 +129,14 @@ class QwenDPOTrainer(DPOTrainer):
         if 'pixel_values_videos' in batch:
             model_kwargs['pixel_values_videos'] = concatenated_batch['pixel_values_videos']
             model_kwargs['video_grid_thw'] = concatenated_batch['video_grid_thw']
-        if 'second_grid_ts' in batch:
-            model_kwargs['second_grid_ts'] = concatenated_batch['second_grid_ts']
+        if "second_per_grid_ts" in batch:
+            model_kwargs["second_per_grid_ts"] = concatenated_batch["second_per_grid_ts"]
 
         prompt_input_ids = concatenated_batch["prompt_input_ids"]
         prompt_attention_mask = concatenated_batch["prompt_attention_mask"]
         completion_input_ids = concatenated_batch["completion_input_ids"]
         completion_attention_mask = concatenated_batch["completion_attention_mask"]
+        prompt_mm_token_type_ids = concatenated_batch.get("prompt_mm_token_type_ids")
         
         input_ids = torch.cat((prompt_input_ids, completion_input_ids), dim=1)
         attention_mask = torch.cat((prompt_attention_mask, completion_attention_mask), dim=1)
@@ -130,7 +147,15 @@ class QwenDPOTrainer(DPOTrainer):
         # Flush left to reduce the memory usage
         # [[0, 0, x, x, x, x],  ->  [[x, x, x, x],
         #  [0, x, x, x, 0, 0]]       [x, x, x, 0]]
-        attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
+        if prompt_mm_token_type_ids is not None:
+            completion_mm_token_type_ids = torch.zeros_like(completion_input_ids)
+            mm_token_type_ids = torch.cat((prompt_mm_token_type_ids, completion_mm_token_type_ids), dim=1)
+            attention_mask, input_ids, loss_mask, mm_token_type_ids = flush_left(
+                attention_mask, input_ids, loss_mask, mm_token_type_ids
+            )
+            model_kwargs["mm_token_type_ids"] = mm_token_type_ids
+        else:
+            attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
 
         model_kwargs["attention_mask"] = attention_mask
 

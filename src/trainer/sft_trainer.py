@@ -261,6 +261,17 @@ class QwenSFTTrainer(Trainer):
             "attention_mask": attention_masks,
         }
 
+        if "mm_token_type_ids" in original_inputs:
+            padded_mm_token_type_ids = torch.zeros(
+                (batch_size, max_prompt_len),
+                dtype=original_inputs["mm_token_type_ids"].dtype,
+                device=device,
+            )
+            for i, prompt in enumerate(batch_prompt_ids):
+                prompt_len = len(prompt)
+                padded_mm_token_type_ids[i, :prompt_len] = original_inputs["mm_token_type_ids"][i, :prompt_len]
+            gen_inputs["mm_token_type_ids"] = padded_mm_token_type_ids
+
         # Add vision inputs if present
         if "pixel_values" in original_inputs:
             gen_inputs["pixel_values"] = original_inputs["pixel_values"]

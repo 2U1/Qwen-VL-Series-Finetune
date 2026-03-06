@@ -168,3 +168,4 @@ scripts_tmp/
 logs/*.log
 
 testing.ipynb
+.vscode/*

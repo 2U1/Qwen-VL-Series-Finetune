@@ -16,7 +16,7 @@ from src.constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import get_image_info, get_video_info, llava_to_openai, pad_sequence
+from .data_utils import get_image_info, get_mm_token_type_ids, get_video_info, llava_to_openai, pad_sequence
 
 class SupervisedDataset(Dataset):
     """Dataset for supervised fine-tuning."""
@@ -132,6 +132,7 @@ class SupervisedDataset(Dataset):
 
         all_input_ids = []
         all_labels = []
+        all_mm_token_type_ids = []
         all_pixel_values = []
         all_image_grid_thw = []
         all_second_gird = []
@@ -148,6 +149,7 @@ class SupervisedDataset(Dataset):
 
             all_input_ids.append(system_message_input_ids.squeeze(0))
             all_labels.append(system_labels.squeeze(0))
+            all_mm_token_type_ids.append(torch.zeros_like(system_message_input_ids, dtype=torch.long).squeeze(0))
 
         for _, j in enumerate(range(0, len(sources), 2)):
             user_input = sources[j]
@@ -162,6 +164,7 @@ class SupervisedDataset(Dataset):
                 images_for_this_turn = images[image_curr_count : image_curr_count + num_images]
                 inputs = processor(text=[user_input], images=images_for_this_turn, videos=videos, padding=False, do_resize=False, return_tensors='pt')
                 prompt_input_ids = inputs['input_ids']
+                prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, prompt_input_ids)
                 all_pixel_values.append(inputs[pixel_key])
                 all_image_grid_thw.append(inputs[grid_key])
                 image_curr_count += num_images
@@ -180,9 +183,9 @@ class SupervisedDataset(Dataset):
                         return_tensors='pt', 
                         **video_kwargs
                     )
+                    prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
                     all_second_gird.extend(inputs["second_per_grid_ts"])
                 elif "Qwen3" in self.model_id:
-
                     videos_for_this_turn = videos[video_curr_count : video_curr_count + num_videos]
                     video_datas_for_turn, video_metadatas_for_turn = zip(*videos_for_this_turn)
                     video_datas_for_turn = list(video_datas_for_turn)
@@ -198,6 +201,7 @@ class SupervisedDataset(Dataset):
                         **video_kwargs,
                         video_metadata=video_metadatas_for_turn,
                     )
+                    prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
                 else:
                     inputs = processor(
                         text=[user_input], 
@@ -207,6 +211,7 @@ class SupervisedDataset(Dataset):
                         do_resize=False, 
                         return_tensors='pt'
                     )
+                    prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
                 prompt_input_ids = inputs['input_ids']
                 all_pixel_values.append(inputs[pixel_key])
                 all_image_grid_thw.append(inputs[grid_key])
@@ -214,10 +219,13 @@ class SupervisedDataset(Dataset):
 
             else:
                 prompt_input_ids = processor.tokenizer(user_input, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+                prompt_mm_token_type_ids = torch.zeros_like(prompt_input_ids, dtype=torch.long)
 
             response_input_ids = processor.tokenizer(gpt_response, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+            response_mm_token_type_ids = torch.zeros_like(response_input_ids, dtype=torch.long)
 
             input_ids = torch.cat([prompt_input_ids, response_input_ids], dim=1).squeeze(0)
+            mm_token_type_ids = torch.cat([prompt_mm_token_type_ids, response_mm_token_type_ids], dim=1).squeeze(0)
             labels = torch.cat(
                 [
                     torch.tensor([IGNORE_INDEX] * len(prompt_input_ids[0])),
@@ -228,11 +236,13 @@ class SupervisedDataset(Dataset):
 
             all_input_ids.append(input_ids)
             all_labels.append(labels)
+            all_mm_token_type_ids.append(mm_token_type_ids)
 
         # There is no need for eos or bos tokens in the input_ids
         # Qwen2-VL does not use them
         input_ids = torch.cat(all_input_ids, dim=0).to(torch.long)
         labels = torch.cat(all_labels, dim=0).to(torch.long)
+        mm_token_type_ids = torch.cat(all_mm_token_type_ids, dim=0).to(torch.long)
 
         # eos_token_id = processor.tokenizer.convert_tokens_to_ids(DEFAULT_IM_END_TOKEN)
         # input_ids, labels = truncate_sequence(input_ids, labels, self.max_length, eos_token_id)
@@ -243,6 +253,7 @@ class SupervisedDataset(Dataset):
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
+            mm_token_type_ids=mm_token_type_ids,
         )
 
         if pixel_key and grid_key:
@@ -271,6 +282,7 @@ class DataCollatorForSupervisedDataset(object):
         batch_video_thw = []
         batch_image_thw = []
         batch_second_per_grid_ts = []
+        batch_mm_token_type_ids = []
 
         for example in examples:
             keys = example.keys()
@@ -283,6 +295,7 @@ class DataCollatorForSupervisedDataset(object):
 
             batch_input_ids.append(example["input_ids"])
             batch_label_ids.append(example["labels"])
+            batch_mm_token_type_ids.append(example["mm_token_type_ids"])
 
             if "second_per_grid_ts" in keys:
                 batch_second_per_grid_ts.extend(example["second_per_grid_ts"])
@@ -293,11 +306,13 @@ class DataCollatorForSupervisedDataset(object):
 
         attention_mask = input_ids != self.pad_token_id
         labels = pad_sequence(batch_label_ids, padding_side='right', padding_value=IGNORE_INDEX)
+        mm_token_type_ids = pad_sequence(batch_mm_token_type_ids, padding_side='right', padding_value=0)
 
         data_dict = {
             'input_ids': input_ids,
             'labels': labels,
             'attention_mask': attention_mask,
+            'mm_token_type_ids': mm_token_type_ids,
         }
 
         if len(batch_pixel_values) > 0:

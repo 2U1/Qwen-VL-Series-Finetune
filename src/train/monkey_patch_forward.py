@@ -10,7 +10,6 @@ import transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe
 from transformers.utils import TransformersKwargs
 from transformers.processing_utils import Unpack
 from transformers.cache_utils import Cache
-from transformers.utils import is_torchdynamo_compiling
 
 def replace_qwen_2_with_mixed_modality_forward():
     transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLModel.forward = qwen2_mixed_modality_forward
@@ -35,6 +34,7 @@ def qwen3_vl_moe_mixed_modality_forward(
     pixel_values_videos: Optional[torch.FloatTensor] = None,
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
+    mm_token_type_ids: Optional[torch.IntTensor] = None,
     cache_position: Optional[torch.LongTensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
@@ -106,50 +106,15 @@ def qwen3_vl_moe_mixed_modality_forward(
         deepstack_visual_embeds = [t.narrow(0, 0, 0) for t in dummy_deepstack]
 
     if position_ids is None:
-        attention_mask_tensor = (
-            attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
+        position_ids = self.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
         )
-        if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
-            attention_mask_tensor = torch.diagonal(attention_mask_tensor[:, 0], dim1=1, dim2=2)
-            # Only apply conversion for floating point tensors (inverted masks)
-            if attention_mask_tensor.dtype.is_floating_point:
-                attention_mask_tensor = attention_mask_tensor / torch.finfo(attention_mask_tensor.dtype).min
-                attention_mask_tensor = (1.0 - attention_mask_tensor).int()
-
-        # Calculate RoPE index once per generation in the pre-fill stage only.
-        # When compiling, we can't check tensor values thus we check only input length
-        # It is safe to assume that `length!=1` means we're in pre-fill because compiled
-        # models currently cannot do asssisted decoding
-        prefill_compiled_stage = is_torchdynamo_compiling() and (
-            (input_ids is not None and input_ids.shape[1] != 1)
-            or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
-        )
-        prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
-            (cache_position is not None and cache_position[0] == 0)
-            or (past_key_values is None or past_key_values.get_seq_length() == 0)
-        )
-        if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids,
-                image_grid_thw,
-                video_grid_thw,
-                attention_mask=attention_mask_tensor,
-            )
-            self.rope_deltas = rope_deltas
-        # then use the prev pre-calculated rope-deltas to get the correct position ids
-        else:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            delta = (
-                (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                if cache_position is not None
-                else 0
-            )
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-            position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-            if cache_position is not None:  # otherwise `deltas` is an int `0`
-                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-            position_ids = position_ids.add(delta)
-            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
     outputs = self.language_model(
         input_ids=None,
@@ -181,6 +146,7 @@ def qwen3_vl_mixed_modality_forward(
     pixel_values_videos: Optional[torch.FloatTensor] = None,
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
+    mm_token_type_ids: Optional[torch.IntTensor] = None,
     cache_position: Optional[torch.LongTensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
@@ -257,50 +223,15 @@ def qwen3_vl_mixed_modality_forward(
         deepstack_visual_embeds = [t.narrow(0, 0, 0) for t in dummy_deepstack]
 
     if position_ids is None:
-        attention_mask_tensor = (
-            attention_mask if not isinstance(attention_mask, dict) else attention_mask["full_attention"]
+        position_ids = self.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
         )
-        if attention_mask_tensor is not None and attention_mask_tensor.ndim == 4:
-            attention_mask_tensor = torch.diagonal(attention_mask_tensor[:, 0], dim1=1, dim2=2)
-            # Only apply conversion for floating point tensors (inverted masks)
-            if attention_mask_tensor.dtype.is_floating_point:
-                attention_mask_tensor = attention_mask_tensor / torch.finfo(attention_mask_tensor.dtype).min
-                attention_mask_tensor = (1.0 - attention_mask_tensor).int()
-
-        # Calculate RoPE index once per generation in the pre-fill stage only.
-        # When compiling, we can't check tensor values thus we check only input length
-        # It is safe to assume that `length!=1` means we're in pre-fill because compiled
-        # models currently cannot do asssisted decoding
-        prefill_compiled_stage = is_torchdynamo_compiling() and (
-            (input_ids is not None and input_ids.shape[1] != 1)
-            or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
-        )
-        prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
-            (cache_position is not None and cache_position[0] == 0)
-            or (past_key_values is None or past_key_values.get_seq_length() == 0)
-        )
-        if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids,
-                image_grid_thw,
-                video_grid_thw,
-                attention_mask=attention_mask_tensor,
-            )
-            self.rope_deltas = rope_deltas
-        # then use the prev pre-calculated rope-deltas to get the correct position ids
-        else:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            delta = (
-                (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                if cache_position is not None
-                else 0
-            )
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-            position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-            if cache_position is not None:  # otherwise `deltas` is an int `0`
-                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-            position_ids = position_ids.add(delta)
-            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
     outputs = self.language_model(
         input_ids=None,
@@ -336,6 +267,7 @@ def qwen2_5_mixed_modality_forward(
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
     rope_deltas: Optional[torch.LongTensor] = None,
+    mm_token_type_ids: Optional[torch.IntTensor] = None,
     cache_position: Optional[torch.LongTensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
@@ -390,37 +322,16 @@ def qwen2_5_mixed_modality_forward(
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if position_ids is None:
-        # Calculate RoPE index once per generation in the pre-fill stage only.
-        # When compiling, we can't check tensor values thus we check only input length
-        # It is safe to assume that `length!=1` means we're in pre-fill because compiled
-        # models currently cannot do asssisted decoding
-        prefill_compiled_stage = is_torchdynamo_compiling() and (
-            (input_ids is not None and input_ids.shape[1] != 1)
-            or (inputs_embeds is not None and inputs_embeds.shape[1] != 1)
+        position_ids = self.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
         )
-        prefill_noncompiled_stage = not is_torchdynamo_compiling() and (
-            (cache_position is not None and cache_position[0] == 0)
-            or (past_key_values is None or past_key_values.get_seq_length() == 0)
-        )
-        if (prefill_compiled_stage or prefill_noncompiled_stage) or self.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids,
-                image_grid_thw,
-                video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                attention_mask=attention_mask,
-            )
-            self.rope_deltas = rope_deltas
-        else:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-            position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-            if cache_position is not None:
-                delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-            else:
-                delta = torch.zeros((batch_size, seq_length), device=inputs_embeds.device)
-            delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=1)
-            position_ids += delta.to(position_ids.device)
 
     outputs = self.language_model(
         input_ids=None,
@@ -462,6 +373,7 @@ def qwen2_mixed_modality_forward(
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
     rope_deltas: Optional[torch.LongTensor] = None,
+    mm_token_type_ids: Optional[torch.IntTensor] = None,
     cache_position: Optional[torch.LongTensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
@@ -514,22 +426,15 @@ def qwen2_mixed_modality_forward(
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if position_ids is None:
-        if self.rope_deltas is None or cache_position is None or cache_position[0] == 0:
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids, image_grid_thw, video_grid_thw, attention_mask
-            )
-            self.rope_deltas = rope_deltas
-        # then use the prev pre-calculated rope-deltas to get the correct position ids
-        else:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-            position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-            if cache_position is not None:
-                delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-            else:
-                delta = torch.zeros((batch_size, seq_length), device=inputs_embeds.device)
-            delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-            position_ids += delta.to(position_ids.device)
+        position_ids = self.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            mm_token_type_ids=mm_token_type_ids,
+        )
 
     outputs = self.language_model(
         input_ids=None,

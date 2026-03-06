@@ -12,7 +12,7 @@ from src.constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import pad_sequence, samples_per_class_from_ids
+from .data_utils import get_mm_token_type_ids, pad_sequence, samples_per_class_from_ids
 
 CLASS_2_ID = {
     "A": 0,
@@ -153,6 +153,7 @@ class ClassificationDataset(Dataset):
             return_tensors="pt",
             **video_kwargs
         )
+        mm_token_type_ids = get_mm_token_type_ids(data_dict, data_dict["input_ids"])
 
         labels = [torch.tensor(CLASS_2_ID[sources["label"]], dtype=torch.long)]
 
@@ -163,6 +164,7 @@ class ClassificationDataset(Dataset):
 
         data_dict['labels'] = labels
         data_dict['attention_mask'] = attention_mask
+        data_dict['mm_token_type_ids'] = mm_token_type_ids
 
         for key, value in data_dict.items():  # cast data dtype for paligemma
             if torch.is_tensor(value) and torch.is_floating_point(value):
@@ -185,6 +187,7 @@ class DataCollatorForClassificationDataset(object):
         batch_video_thw = []
         batch_image_thw = []
         batch_second_per_grid_ts = []
+        batch_mm_token_type_ids = []
         
         for example in examples:
             keys = example.keys()
@@ -197,6 +200,7 @@ class DataCollatorForClassificationDataset(object):
             
             batch_input_ids.append(example["input_ids"].squeeze(0))
             batch_labels.extend(example["labels"])
+            batch_mm_token_type_ids.append(example["mm_token_type_ids"].squeeze(0))
 
             if "second_per_grid_ts" in keys:
                 batch_second_per_grid_ts.extend(example["second_per_grid_ts"])
@@ -205,6 +209,9 @@ class DataCollatorForClassificationDataset(object):
             batch_input_ids, padding_side=self.padding_side, padding_value=self.pad_token_id
         )
         labels = torch.tensor(batch_labels, dtype=torch.long)
+        mm_token_type_ids = pad_sequence(
+            batch_mm_token_type_ids, padding_side=self.padding_side, padding_value=0
+        )
 
         attention_mask = input_ids != self.pad_token_id
 
@@ -212,6 +219,7 @@ class DataCollatorForClassificationDataset(object):
             'input_ids': input_ids,
             'labels': labels,
             'attention_mask': attention_mask,
+            'mm_token_type_ids': mm_token_type_ids,
         }
 
         if len(batch_pixel_values) > 0:

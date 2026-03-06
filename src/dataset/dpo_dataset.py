@@ -14,7 +14,7 @@ from src.constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import get_image_info, get_video_info, pad_sequence, replace_image_tokens
+from .data_utils import get_image_info, get_mm_token_type_ids, get_video_info, pad_sequence, replace_image_tokens
 
 
 class DPODataset(Dataset):
@@ -128,6 +128,7 @@ class DPODataset(Dataset):
             videos=None
 
         all_input_ids = [] 
+        all_prompt_mm_token_type_ids = []
         all_rejected = []
         all_chosen =[]
         all_pixel_values = []
@@ -139,6 +140,7 @@ class DPODataset(Dataset):
             system_message_input_ids = processor.tokenizer(system_message, add_special_tokens=False, return_tensors='pt')['input_ids'] 
             
             all_input_ids.append(system_message_input_ids.squeeze(0))
+            all_prompt_mm_token_type_ids.append(torch.zeros_like(system_message_input_ids, dtype=torch.long).squeeze(0))
 
         user_prompt = replace_image_tokens(sources["prompt"], is_video=is_video)
         chosen_response = sources["chosen"]
@@ -151,6 +153,7 @@ class DPODataset(Dataset):
         if DEFAULT_IMAGE_TOKEN in user_input:
             inputs = processor(text=[user_input], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')
             prompt_input_ids = inputs['input_ids']
+            prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, prompt_input_ids)
             all_pixel_values.append(inputs[pixel_key])
             all_image_grid_thw.append(inputs[grid_key])
         elif DEFAULT_VIDEO_TOKEN in user_input:
@@ -164,6 +167,7 @@ class DPODataset(Dataset):
                     return_tensors='pt', 
                     **video_kwargs
                 )
+                prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
                 
                 all_second_gird.extend(inputs["second_per_grid_ts"])
             
@@ -182,6 +186,7 @@ class DPODataset(Dataset):
                     **video_kwargs, 
                     video_metadata=video_metadatas,
                 )
+                prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
             
             else:
                 inputs = processor(
@@ -192,6 +197,7 @@ class DPODataset(Dataset):
                     do_resize=False, 
                     return_tensors='pt'
                 )
+                prompt_mm_token_type_ids = get_mm_token_type_ids(inputs, inputs["input_ids"])
             
             prompt_input_ids = inputs['input_ids']
             all_pixel_values.append(inputs[pixel_key])
@@ -199,21 +205,25 @@ class DPODataset(Dataset):
 
         else:
             prompt_input_ids = processor.tokenizer(user_input, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids']
+            prompt_mm_token_type_ids = torch.zeros_like(prompt_input_ids, dtype=torch.long)
 
         input_ids = prompt_input_ids.squeeze(0)
         chosen_input_ids = processor.tokenizer(chosen_response, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids'].squeeze(0)
         rejected_input_ids = processor.tokenizer(rejected_response, add_special_tokens=False, padding=False, return_tensors='pt')['input_ids'].squeeze(0)
 
         all_input_ids.append(input_ids)
+        all_prompt_mm_token_type_ids.append(prompt_mm_token_type_ids.squeeze(0))
         all_chosen.append(chosen_input_ids)
         all_rejected.append(rejected_input_ids)
 
         input_ids = torch.cat(all_input_ids, dim=0).to(torch.long)
+        prompt_mm_token_type_ids = torch.cat(all_prompt_mm_token_type_ids, dim=0).to(torch.long)
         chosen = torch.cat(all_chosen, dim=0).to(torch.long)
         rejected = torch.cat(all_rejected, dim=0).to(torch.long)
         
         data_dict = dict(
             prompt_input_ids=input_ids,
+            prompt_mm_token_type_ids=prompt_mm_token_type_ids,
             chosen_input_ids=chosen,
             rejected_input_ids=rejected,
         )
@@ -245,6 +255,7 @@ class DataCollatorForDPODataset(object):
         batch_video_thw = []
         batch_image_thw = []
         batch_second_per_grid_ts = []
+        batch_prompt_mm_token_type_ids = []
 
         for example in examples:
             keys = example.keys()
@@ -256,6 +267,7 @@ class DataCollatorForDPODataset(object):
                 batch_image_thw.append(example["image_grid_thw"])
             
             batch_input_ids.append(example["prompt_input_ids"])
+            batch_prompt_mm_token_type_ids.append(example["prompt_mm_token_type_ids"])
             batch_chosen_ids.append(example["chosen_input_ids"])
             batch_rejected_ids.append(example["rejected_input_ids"])
 
@@ -264,6 +276,9 @@ class DataCollatorForDPODataset(object):
 
         prompt_input_ids = pad_sequence(
             batch_input_ids, padding_side='right', padding_value=self.pad_token_id
+        )
+        prompt_mm_token_type_ids = pad_sequence(
+            batch_prompt_mm_token_type_ids, padding_side='right', padding_value=0
         )
 
         chosen = pad_sequence(batch_chosen_ids, padding_side='right', padding_value=self.pad_token_id)
@@ -279,6 +294,7 @@ class DataCollatorForDPODataset(object):
         data_dict = {
             'prompt_input_ids': prompt_input_ids,
             'prompt_attention_mask': prompt_attention_mask,
+            'prompt_mm_token_type_ids': prompt_mm_token_type_ids,
             'chosen_input_ids': chosen,
             'chosen_attention_mask': chosen_attention_mask,
             'rejected_input_ids': rejected,
