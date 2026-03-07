@@ -14,6 +14,7 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
 
 ## Update
 
+- [2026/03/07] Update codebase to `transformers==5.3.0`
 - [2025/11/28] 🔥**Supports video training with DPO and GRPO.**
 - [2025/11/27] 🔥**Supports Qwen3-VL-MoE**
 - [2025/11/26] Update support for liger-kernel in Qwen3-VL.
@@ -57,7 +58,7 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
       - [Merge LoRA Weights](#merge-lora-weights)
     - [Evaluation during Training](#evaluation-during-training)
       - [Step 1: Prepare Evaluation Dataset](#step-1-prepare-evaluation-dataset)
-      - [Step 2: Define compute\_metrics Function](#step-2-define-compute_metrics-function)
+      - [Step 2: Define compute_metrics Function](#step-2-define-compute_metrics-function)
       - [Step 3: Modify Training Script](#step-3-modify-training-script)
       - [Step 4: Add Evaluation Arguments](#step-4-add-evaluation-arguments)
   - [DPO Finetuning](#dpo-finetuning)
@@ -301,6 +302,7 @@ bash scripts/finetune.sh
 ### Finetune with LoRA
 
 **Note:** Liger-kernel won't work with QLoRA. You need to disable to use QLoRA.<br>
+**Note:** Do not combine quantization (`--bits 4` / `--bits 8`, i.e. QLoRA) with vision training. If you want to train vision-related modules (`--vision_lora True`, `--freeze_vision_tower False`, or `--unfreeze_topk_vision > 0`), use full precision training (`--bits 16`).<br>
 If you want to train only the language model with LoRA and perform full training for the vision model:
 
 ```bash
