@@ -14,6 +14,8 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
 
 ## Update
 
+- [2026/03/07] 🔥**Supports reasoning mode training for Qwen3-VL and Qwen3.5**
+- [2026/03/07] 🔥**Supports Qwen3.5 Series.**
 - [2026/03/07] Supports Qwen3-VL classification
 - [2026/03/07] Update codebase to `transformers==5.3.0`
 - [2025/11/28] 🔥**Supports video training with DPO and GRPO.**
@@ -23,7 +25,7 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
 - [2025/08/21] Add option for using 2-layer mlp for classification.
 - [2025/08/21] Add option for unfreeze only few layers for llm and vision tower.
 - [2025/08/08] 🔥Monkey patch Qwen2.5-VL's window attention and forward for using less memory and speedups.
-- [2025/07/25] Updated Classification training script for experimental feature.
+- [2025/07/25] Updated Classification training script.
 - [2025/05/29] 🔥Supports GRPO training.
 - [2025/04/16] 🔥Supports DPO training.
 - [2025/03/04] Add Option for using liger kernel.
@@ -50,7 +52,9 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
     - [Environments](#environments)
     - [Using `requirements.txt`](#using-requirementstxt)
     - [Using `environment.yaml`](#using-environmentyaml)
+  - [Training Notes](#training-notes)
   - [Dataset Preparation](#dataset-preparation)
+    - [Reasoning Format](#reasoning-format)
   - [Supervised Fine Tuning](#supervised-fine-tuning)
     - [Full Finetuning](#full-finetuning)
     - [Finetune with LoRA](#finetune-with-lora)
@@ -59,14 +63,13 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
       - [Merge LoRA Weights](#merge-lora-weights)
     - [Evaluation during Training](#evaluation-during-training)
       - [Step 1: Prepare Evaluation Dataset](#step-1-prepare-evaluation-dataset)
-      - [Step 2: Define compute_metrics Function](#step-2-define-compute_metrics-function)
+      - [Step 2: Define compute\_metrics Function](#step-2-define-compute_metrics-function)
       - [Step 3: Modify Training Script](#step-3-modify-training-script)
       - [Step 4: Add Evaluation Arguments](#step-4-add-evaluation-arguments)
   - [DPO Finetuning](#dpo-finetuning)
   - [GRPO Finetuning](#grpo-finetuning)
     - [Prerequisites](#prerequisites)
   - [Classification Finetuning](#classification-finetuning)
-    - [⚠️This is an experimental feature.](#️this-is-an-experimental-feature)
       - [Experimental Features](#experimental-features)
   - [Inference](#inference)
     - [Gradio Infernce (WebUI)](#gradio-infernce-webui)
@@ -76,6 +79,9 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
   - [License](#license)
   - [Citation](#citation)
   - [Acknowledgement](#acknowledgement)
+
+> [!WARNING]
+> Read [Training Notes](#training-notes) before running any training script. It contains required settings and compatibility notes for `Qwen3.5`, `QLoRA + vision`, `QLoRA + liger`, `DeepSpeed`, and video training.
 
 ## Supported Features
 
@@ -130,6 +136,16 @@ pip install flash-attn --no-build-isolation
 ```
 
 **Note:** You should install flash-attn after installing the other packages.
+
+## Training Notes
+
+- `Qwen3.5` series: use `--disable_flash_attn2 True` for now. In local testing, Flash Attention 2 raised CUDA errors while `sdpa` was stable. This applies to SFT, CLS, DPO, and GRPO.
+- `QLoRA + vision`: do not combine quantization (`--bits 4` / `--bits 8`) with vision training (`--vision_lora True`, `--freeze_vision_tower False`, or `--unfreeze_topk_vision > 0`). Use `--bits 16` if you want to train vision-related modules.
+- `QLoRA + liger`: disable liger when using QLoRA.
+- `DeepSpeed`: zero2 is usually faster and often more stable than zero3, but it uses more memory.
+- `Video`: do not set `fps` and `nframes` at the same time.
+- `Top-k unfreeze`: if you use `--unfreeze_topk_llm` or `--unfreeze_topk_vision`, keep the corresponding base module frozen first with `--freeze_llm True` or `--freeze_vision_tower True`.
+- `Learning rates`: `vision_model` usually works better with a learning rate about 5x to 10x smaller than `language_model`.
 
 ## Dataset Preparation
 
@@ -269,7 +285,8 @@ The script requires a dataset formatted according to the LLaVA specification. Th
       },
       {
         "from": "gpt",
-        "value": "<think>Let's analyze the image step-by-step. The image shows a right-angled triangle with points B, C, and A. The angle at point B is a right angle, indicating that trigonometric functions can be applied. To find the bearing angle, we need to relate the sides of the triangle. The tangent function is suitable here because it relates the opposite side (BC) to the adjacent side (AB) in a right-angled triangle. By using the tangent function, we can calculate the angle at point A, which is the bearing angle. Therefore, the most appropriate geometric method is the use of trigonometric functions.</think>\n\n<answer>A</answer>"
+        "reasoning": "Let's analyze the image step-by-step. The image shows a right-angled triangle with points B, C, and A. The angle at point B is a right angle, indicating that trigonometric functions can be applied. To find the bearing angle, we need to relate the sides of the triangle. The tangent function is suitable here because it relates the opposite side (BC) to the adjacent side (AB) in a right-angled triangle. By using the tangent function, we can calculate the angle at point A, which is the bearing angle. Therefore, the most appropriate geometric method is the use of trigonometric functions.",
+        "value": "<answer>A</answer>"
       }
     ]
   }
@@ -279,6 +296,89 @@ The script requires a dataset formatted according to the LLaVA specification. Th
 
 </details>
 
+### Reasoning Format
+
+You can keep using the normal dataset format, but if you want to train with an explicit reasoning trace you should add a separate `reasoning` field instead of manually concatenating `<think>...</think>` into `value`.
+
+Use `--enable_reasoning True` only for the following model families:
+
+- `Qwen/Qwen3-VL-*-Thinking`
+- `Qwen/Qwen3.5-*`
+
+When `--enable_reasoning True` is enabled, the dataset pipeline follows the official chat template behavior for supported models:
+
+- The assistant prompt scaffold is treated as prompt-only and masked out from the loss.
+- If a reasoning field is present, the prompt is prefixed with the model's reasoning prefill, such as `<|im_start|>assistant\n<think>\n`, and the label starts from the reasoning body.
+- The `reasoning` field is inserted into the reasoning block.
+- The `value` field is treated as the final answer body after the reasoning block.
+
+This is intended to make training-time formatting match the model's default inference-time chat template as closely as possible for supported reasoning models.
+
+For unsupported models such as `Qwen2-VL`, `Qwen2.5-VL`, and non-thinking `Qwen3-VL-Instruct`, `--enable_reasoning True` raises an error on purpose.
+
+**Qwen3.5 special case**
+
+- `Qwen3.5` is the only supported family where samples may mix reasoning and non-reasoning data under `--enable_reasoning True`.
+- If a `Qwen3.5` sample has a `reasoning` field, the prompt uses the open thinking scaffold and the label starts from the reasoning body.
+- If a `Qwen3.5` sample does not have a `reasoning` field, the dataset uses the official non-thinking scaffold `<think>\n\n</think>\n\n` as prompt-only and trains only on the final answer.
+- Even with `--enable_reasoning False`, `Qwen3.5` still uses the official non-thinking prompt scaffold so that training stays compatible with normal `enable_thinking=False` inference.
+
+**Qwen3-VL-Thinking restriction**
+
+- `Qwen3-VL-*-Thinking` does not support reasoning-optional samples in this repo.
+- If you use `--enable_reasoning True` with `Qwen3-VL-*-Thinking`, every assistant sample must include a non-empty `reasoning` field.
+
+**SFT / GRPO format**
+
+Add `reasoning` to the assistant turn:
+
+```json
+[
+  {
+    "id": "sample_reasoning",
+    "image": "example.jpg",
+    "conversations": [
+      {
+        "from": "human",
+        "value": "<image>\nDescribe what happened here."
+      },
+      {
+        "from": "gpt",
+        "reasoning": "The vehicle is in a place where it normally should not be. It is partially submerged and visibly damaged, so an accident is the most likely explanation.",
+        "value": "A damaged vehicle is partially submerged in a swimming pool."
+      }
+    ]
+  }
+]
+```
+
+**DPO format**
+
+Add `chosen_reasoning` and `rejected_reasoning` alongside the corresponding answers:
+
+```json
+[
+  {
+    "id": "sample_dpo_reasoning",
+    "image": "example.jpg",
+    "prompt": "<image>\nDescribe what happened here.",
+    "chosen_reasoning": "The scene is unusual because the vehicle is in a pool and appears damaged, which strongly suggests an accident or deliberate crash scenario.",
+    "chosen": "A damaged vehicle is partially submerged in a swimming pool.",
+    "rejected_reasoning": "The image simply shows a vehicle near water, so there is not enough evidence to say anything unusual happened.",
+    "rejected": "A car is parked beside a swimming pool."
+  }
+]
+```
+
+**Notes**
+
+- The position of the `reasoning` key inside the JSON object does not matter. It can appear before or after `value`.
+- Keep the final answer in `value`, `chosen`, and `rejected`. Do not manually wrap them with `<think>` when using `--enable_reasoning True`.
+- For DPO, each sample must provide both `chosen_reasoning` and `rejected_reasoning`, or neither of them.
+- Reasoning-optional samples are supported only for `Qwen3.5`. `Qwen3-VL-*-Thinking` requires reasoning on every sample when `--enable_reasoning True` is enabled.
+- For `Qwen3.5`, the scaffold inserted by the official chat template remains prompt-only. The loss starts from the reasoning body if present, otherwise from the final answer.
+- If you want complete manual control over the output format, leave `--enable_reasoning False`. Note that `Qwen3.5` still uses the official non-thinking scaffold for compatibility.
+
 <br><br>
 
 Adding the new domain-specific data on top of the general data from open-source data will enhance downstream capabilities while retaining the foundational skills. Of course, you can also choose to fine-tune solely on the new data based on your requirements.
@@ -287,14 +387,11 @@ Adding the new domain-specific data on top of the general data from open-source 
 
 ⚠️**For Qwen3-VL models, using liger-kernel with full fine-tuning is awfully slow. I recommend turning off liger-kernel or use zero2 with full-finetuning.**<br><br>
 
-**Note:** Deepspeed zero2 is faster than zero3, however it consumes more memory. Also, most of the time zero2 is more stable than zero3.<br><br>
 **Tip:** You could use `adamw_bnb_8bit` for optimizer to save memory.
 
 To run the training script, use the following command:
 
 ### Full Finetuning
-
-**Note:** If you want to use `unfreeze_topk_llm` or `unfreeze_topk_vision` you should set `-freeze_llm` or `--freeze_vision_tower` to `true`.
 
 ```bash
 bash scripts/finetune.sh
@@ -302,8 +399,6 @@ bash scripts/finetune.sh
 
 ### Finetune with LoRA
 
-**Note:** Liger-kernel won't work with QLoRA. You need to disable to use QLoRA.<br>
-**Note:** Do not combine quantization (`--bits 4` / `--bits 8`, i.e. QLoRA) with vision training. If you want to train vision-related modules (`--vision_lora True`, `--freeze_vision_tower False`, or `--unfreeze_topk_vision > 0`), use full precision training (`--bits 16`).<br>
 If you want to train only the language model with LoRA and perform full training for the vision model:
 
 ```bash
@@ -349,6 +444,7 @@ bash scripts/finetune_lora_vision.sh
 - `--video_resized_height` (int): Option for setting the height of the input video.
 - `--fps` (float): Frames per second for video data.
 - `--nframes` (int): Number of frames for video data.
+- `--enable_reasoning` (bool): Enable structured reasoning fields for supported reasoning models (`Qwen3-VL-Thinking`, `Qwen3.5`). `Qwen3.5` may mix reasoning and non-reasoning samples. `Qwen3-VL-Thinking` requires a non-empty reasoning field on every sample. For DPO, each sample must provide both `chosen_reasoning` and `rejected_reasoning`, or neither of them.
 - `--unfreeze_topk_llm` (int): Number of top layers to unfreeze in the language model.
 - `--unfreeze_topk_vision` (int): Number of top layers to unfreeze in the vision model.
 - `--lora_enable` (bool): Option for using LoRA.
@@ -366,20 +462,17 @@ bash scripts/finetune_lora_vision.sh
 - `--logging_steps` (int): Logging steps (default: 1).
 - `--dataloader_num_workers` (int): Number of data loader workers (default: 4).
 
-**Note:** The learning rate of `vision_model` should be 10x ~ 5x smaller than the `language_model`.
-
 </details>
 
 ### Train with video dataset
 
 You can train the model using a video dataset. You can set LoRA configs and use for LoRA too.<br>
-**Note:** You could not set `fps` and `nframes` at the same time.
 
 ```bash
 bash scripts/finetune_video.sh
 ```
 
-**Note:** When training with video, it just as multi-image so you should adjust the `max_pixels` for maximum resolution and `fps` based on the available VRAM.
+When training with video, it behaves like multi-image input, so adjust `max_pixels` and `fps` based on the available VRAM.
 
 If you run out of vram, you can use [zero3_offload](./scripts/zero3_offload.json) instead of [zero3](./scripts/zero3_offload.json).<br>
 You could use [zero2_offload](./scripts/zero2_offload.json) for a bit faster training.
@@ -558,6 +651,8 @@ def compute_metrics(eval_pred: GenerativeEvalPrediction):
 You can train the model using Direct Preference Optimization (DPO).<br>
 The process is quite similar to Supervised Fine-Tuning (SFT), and you can also apply LoRA during DPO training just like in SFT.
 
+If you are training a supported reasoning model, add `--enable_reasoning True` and provide `chosen_reasoning` / `rejected_reasoning` in the dataset as described in [Reasoning Format](#reasoning-format). Each DPO sample must contain both reasoning fields or neither of them, and reasoning-optional samples are supported only for `Qwen3.5`.
+
 ```bash
 bash scripts/finetune_dpo.sh
 ```
@@ -578,6 +673,8 @@ Most of the training arugments are same as SFT, but few other arguments are adde
 You can traing the model using Group Relative Policy Optimization (GRPO) <br>
 The process is quite similar to Supervised Fine-Tuning (SFT), and you can also apply LoRA during GRPO training just like in SFT.<br>
 <br>
+
+If you are training a supported reasoning model, add `--enable_reasoning True` and store the assistant reasoning in the `reasoning` field of the assistant turn as described in [Reasoning Format](#reasoning-format). Reasoning-optional samples are supported only for `Qwen3.5`.
 
 ### Prerequisites
 
@@ -610,8 +707,6 @@ Most of the training arugments are same as SFT, but few other arguments are adde
 </details>
 
 ## Classification Finetuning
-
-### ⚠️This is an experimental feature.
 
 The [model](src/model/modeling_cls.py) is tailored for classification tasks, such as other SequenceClassification models.
 
@@ -724,6 +819,7 @@ You could see this [issue](https://github.com/andimarafioti/florence2-finetuning
 - [x] Add GRPO
 - [x] Support Qwen3-VL(non-moe)
 - [x] Support Qwen3-VL-Moe
+- [x] Support Qwen3.5
 
 ## Known Issues
 

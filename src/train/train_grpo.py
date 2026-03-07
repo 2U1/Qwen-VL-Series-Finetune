@@ -137,6 +137,9 @@ def train():
         attn_implementation="sdpa" if training_args.disable_flash_attn2 else "flash_attention_2",
         **bnb_model_from_pretrained_args,
     )
+    if training_args.use_liger_loss and model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+        rank0_print(f"Disabling Liger loss for unsupported model_type: {model.config.model_type}")
+        training_args.use_liger_loss = False
 
 
     model.config.use_cache = False

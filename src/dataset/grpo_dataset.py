@@ -13,7 +13,16 @@ from constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import get_image_info, get_video_info, llava_to_openai
+from .data_utils import (
+    chat_template_uses_reasoning_prefill,
+    format_assistant_response,
+    get_image_info,
+    get_qwen_multimodal_settings,
+    get_video_info,
+    llava_to_openai,
+    model_supports_optional_reasoning,
+    use_default_system_message,
+)
 
 class GRPODataset(Dataset):
     """Dataset for DPO training"""
@@ -48,12 +57,17 @@ class GRPODataset(Dataset):
         self.fps = data_args.fps
         self.nframes = data_args.nframes
 
-        if "Qwen3" in self.model_id:
-            self.image_patch_size = 16
-            self.return_video_metadata = True
-        else:
-            self.image_patch_size = 14
-            self.return_video_metadata = False
+        self.model_type, self.image_patch_size, self.return_video_metadata = get_qwen_multimodal_settings(
+            self.model_id
+        )
+        self.reasoning_supported = chat_template_uses_reasoning_prefill(self.processor, self.model_type)
+        self.use_reasoning_prefill = self.data_args.enable_reasoning and self.reasoning_supported
+        self.optional_reasoning_supported = model_supports_optional_reasoning(self.model_type)
+        if self.data_args.enable_reasoning and not self.reasoning_supported:
+            raise ValueError(
+                f"`enable_reasoning` is only supported for Qwen3-VL Thinking or Qwen3.5 models with official reasoning chat templates. "
+                f"Current model_type={self.model_type!r} does not qualify."
+            )
 
         self.processor.image_processor.do_resize = False
 
@@ -123,12 +137,30 @@ class GRPODataset(Dataset):
 
         user_input = conversations[0]
         gpt_response = conversations[1]
+        has_reasoning = isinstance(gpt_response.get("reasoning"), str) and gpt_response["reasoning"].strip()
+        if self.data_args.enable_reasoning and self.reasoning_supported and not self.optional_reasoning_supported and not has_reasoning:
+            raise ValueError(
+                "When `--enable_reasoning True` is used with Qwen3-VL Thinking, every assistant turn must include a non-empty `reasoning` field."
+            )
+        use_reasoning_prefill = self.use_reasoning_prefill and has_reasoning
+        use_closed_think_prefill = self.optional_reasoning_supported and not use_reasoning_prefill
+        assistant_prefill, assistant_prompt = format_assistant_response(
+            gpt_response["content"],
+            gpt_response.get("reasoning"),
+            enable_reasoning=self.data_args.enable_reasoning,
+            use_reasoning_prefill=use_reasoning_prefill,
+            use_closed_think_prefill=use_closed_think_prefill,
+        )
 
-        system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
-        user_message = f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n"
+        system_message = ""
+        if len(SYSTEM_MESSAGE) > 0 and use_default_system_message(self.model_type):
+            system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
+        user_message = (
+            f"{DEFAULT_IM_START_TOKEN}{user_input['role']}\n{user_input['content']}{DEFAULT_IM_END_TOKEN}\n"
+            f"{DEFAULT_IM_START_TOKEN}{gpt_response['role']}\n{assistant_prefill}"
+        )
 
         user_prompt = system_message + user_message
-        assistant_prompt = gpt_response['content']
 
         data_dict = dict(
             prompt=user_prompt,

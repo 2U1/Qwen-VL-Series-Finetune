@@ -296,3 +296,7 @@ class DataArguments:
     video_resized_height: int = field(default=None)
     fps: Optional[int] = field(default=None, metadata={"help": "Frames per second for video data."})
     nframes: Optional[int] = field(default=None, metadata={"help": "Number of frames for video data."})
+    enable_reasoning: bool = field(
+        default=False,
+        metadata={"help": "Enable reasoning-field parsing and model-specific <think> prompt formatting when supported."},
+    )

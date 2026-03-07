@@ -14,7 +14,18 @@ from constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import get_image_info, get_mm_token_type_ids, get_video_info, pad_sequence, replace_image_tokens
+from .data_utils import (
+    chat_template_uses_reasoning_prefill,
+    format_assistant_response,
+    get_image_info,
+    get_mm_token_type_ids,
+    get_qwen_multimodal_settings,
+    get_video_info,
+    model_supports_optional_reasoning,
+    pad_sequence,
+    replace_image_tokens,
+    use_default_system_message,
+)
 
 
 class DPODataset(Dataset):
@@ -50,12 +61,17 @@ class DPODataset(Dataset):
         self.fps = data_args.fps
         self.nframes = data_args.nframes
 
-        if "Qwen3" in self.model_id:
-            self.image_patch_size = 16
-            self.return_video_metadata = True
-        else:
-            self.image_patch_size = 14
-            self.return_video_metadata = False
+        self.model_type, self.image_patch_size, self.return_video_metadata = get_qwen_multimodal_settings(
+            self.model_id
+        )
+        self.reasoning_supported = chat_template_uses_reasoning_prefill(self.processor, self.model_type)
+        self.use_reasoning_prefill = self.data_args.enable_reasoning and self.reasoning_supported
+        self.optional_reasoning_supported = model_supports_optional_reasoning(self.model_type)
+        if self.data_args.enable_reasoning and not self.reasoning_supported:
+            raise ValueError(
+                f"`enable_reasoning` is only supported for Qwen3-VL Thinking or Qwen3.5 models with official reasoning chat templates. "
+                f"Current model_type={self.model_type!r} does not qualify."
+            )
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -135,7 +151,7 @@ class DPODataset(Dataset):
         all_image_grid_thw = []
         all_second_gird = []
 
-        if len(SYSTEM_MESSAGE) > 0 and "Qwen3" not in self.model_id:
+        if len(SYSTEM_MESSAGE) > 0 and use_default_system_message(self.model_type):
             system_message = f"{DEFAULT_IM_START_TOKEN}system\n{SYSTEM_MESSAGE}{DEFAULT_IM_END_TOKEN}\n"
             system_message_input_ids = processor.tokenizer(system_message, add_special_tokens=False, return_tensors='pt')['input_ids'] 
             
@@ -145,8 +161,49 @@ class DPODataset(Dataset):
         user_prompt = replace_image_tokens(sources["prompt"], is_video=is_video)
         chosen_response = sources["chosen"]
         rejected_response = sources["rejected"]
+        chosen_reasoning = sources.get("chosen_reasoning")
+        rejected_reasoning = sources.get("rejected_reasoning")
+        chosen_has_reasoning = isinstance(chosen_reasoning, str) and chosen_reasoning.strip()
+        rejected_has_reasoning = isinstance(rejected_reasoning, str) and rejected_reasoning.strip()
+        if self.data_args.enable_reasoning and chosen_has_reasoning != rejected_has_reasoning:
+            raise ValueError(
+                "Each DPO sample must provide both `chosen_reasoning` and `rejected_reasoning`, or neither of them."
+            )
+        if (
+            self.data_args.enable_reasoning
+            and self.reasoning_supported
+            and not self.optional_reasoning_supported
+            and not chosen_has_reasoning
+        ):
+            raise ValueError(
+                "With `--enable_reasoning True`, Qwen3-VL Thinking DPO samples must include both `chosen_reasoning` and `rejected_reasoning`. "
+                "Reasoning-optional samples are only supported for Qwen3.5."
+            )
+        use_reasoning_prefill = (
+            self.use_reasoning_prefill
+            and chosen_has_reasoning
+            and rejected_has_reasoning
+        )
+        use_closed_think_prefill = self.optional_reasoning_supported and not use_reasoning_prefill
+        assistant_prefill, chosen_response = format_assistant_response(
+            chosen_response,
+            chosen_reasoning,
+            enable_reasoning=self.data_args.enable_reasoning,
+            use_reasoning_prefill=use_reasoning_prefill,
+            use_closed_think_prefill=use_closed_think_prefill,
+        )
+        _, rejected_response = format_assistant_response(
+            rejected_response,
+            rejected_reasoning,
+            enable_reasoning=self.data_args.enable_reasoning,
+            use_reasoning_prefill=use_reasoning_prefill,
+            use_closed_think_prefill=use_closed_think_prefill,
+        )
 
-        user_input = f"{DEFAULT_IM_START_TOKEN}user\n{user_prompt}{DEFAULT_IM_END_TOKEN}\n{DEFAULT_IM_START_TOKEN}assistant\n"
+        user_input = (
+            f"{DEFAULT_IM_START_TOKEN}user\n{user_prompt}{DEFAULT_IM_END_TOKEN}\n"
+            f"{DEFAULT_IM_START_TOKEN}assistant\n{assistant_prefill}"
+        )
         chosen_response = f"{chosen_response}{DEFAULT_IM_END_TOKEN}\n"
         rejected_response = f"{rejected_response}{DEFAULT_IM_END_TOKEN}\n"
 
@@ -157,7 +214,7 @@ class DPODataset(Dataset):
             all_pixel_values.append(inputs[pixel_key])
             all_image_grid_thw.append(inputs[grid_key])
         elif DEFAULT_VIDEO_TOKEN in user_input:
-            if "Qwen2.5" in self.model_id:
+            if self.model_type == "qwen2_5_vl":
                 inputs = processor(
                     text=[user_input], 
                     images=images, 
@@ -171,7 +228,7 @@ class DPODataset(Dataset):
                 
                 all_second_gird.extend(inputs["second_per_grid_ts"])
             
-            elif "Qwen3" in self.model_id:
+            elif self.model_type in {"qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"}:
 
                 video_datas, video_metadatas = zip(*videos)
                 video_datas, video_metadatas = list(video_datas), list(video_metadatas)

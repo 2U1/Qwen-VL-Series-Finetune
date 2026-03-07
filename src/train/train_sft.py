@@ -134,6 +134,11 @@ def train():
         attn_implementation="sdpa" if training_args.disable_flash_attn2 else "flash_attention_2",
         **bnb_model_from_pretrained_args,
     )
+    if training_args.use_liger_kernel and model.config.model_type in {"qwen3_5", "qwen3_5_moe"}:
+        rank0_print(f"Disabling Liger kernel for unsupported model_type: {model.config.model_type}")
+        training_args.use_liger_kernel = False
+        if hasattr(training_args, "liger_kernel_config"):
+            training_args.liger_kernel_config = None
 
     model.config.use_cache = False
     model_to_configure = model

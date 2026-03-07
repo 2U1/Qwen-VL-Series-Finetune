@@ -12,7 +12,13 @@ from constants import (
     SYSTEM_MESSAGE,
 )
 
-from .data_utils import get_mm_token_type_ids, pad_sequence, samples_per_class_from_ids
+from .data_utils import (
+    get_mm_token_type_ids,
+    get_qwen_multimodal_settings,
+    pad_sequence,
+    samples_per_class_from_ids,
+    use_default_system_message,
+)
 
 CLASS_2_ID = {
     "A": 0,
@@ -88,6 +94,7 @@ class ClassificationDataset(Dataset):
         self.video_resized_h = data_args.video_resized_height
         self.fps = data_args.fps
         self.nframes = data_args.nframes
+        self.model_type, _, _ = get_qwen_multimodal_settings(self.model_id)
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -136,7 +143,7 @@ class ClassificationDataset(Dataset):
 
         user_prompt = [{"role": "user", "content": contents}]
 
-        if len(SYSTEM_MESSAGE) > 0:
+        if len(SYSTEM_MESSAGE) > 0 and use_default_system_message(self.model_type):
             system_message = {"role": "system", "content": SYSTEM_MESSAGE}
             user_prompt.insert(0, system_message)
 

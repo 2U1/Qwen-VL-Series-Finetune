@@ -1,5 +1,8 @@
 import re
 import torch
+from functools import lru_cache
+
+from transformers import AutoConfig
 
 from qwen_vl_utils import process_vision_info
 
@@ -15,10 +18,10 @@ from constants import (
 
 def replace_image_tokens(input_string, is_video=False):
     if is_video:
-        pattern = r'\n?' + re.escape(LLAVA_VIDEO_TOKEN) + r'\n?'
+        pattern = r'\n*' + re.escape(LLAVA_VIDEO_TOKEN) + r'\n*'
         replacement = VISION_START_TOKEN + DEFAULT_VIDEO_TOKEN + VISION_END_TOKEN
     else:
-        pattern = r'\n?' + re.escape(LLAVA_IMAGE_TOKEN) + r'\n?'
+        pattern = r'\n*' + re.escape(LLAVA_IMAGE_TOKEN) + r'\n*'
         replacement = VISION_START_TOKEN + DEFAULT_IMAGE_TOKEN + VISION_END_TOKEN
 
     return re.sub(pattern, replacement, input_string)
@@ -33,6 +36,8 @@ def llava_to_openai(conversations, is_video=False):
             "role": role_mapping.get(conversation["from"], conversation["from"]),
             "content": transformed_content,
         }
+        if "reasoning" in conversation:
+            transformed_entry["reasoning"] = conversation["reasoning"]
         transformed_data.append(transformed_entry)
 
     return transformed_data
@@ -74,6 +79,61 @@ def get_mm_token_type_ids(inputs, input_ids):
     if mm_token_type_ids is None:
         return torch.zeros_like(input_ids, dtype=torch.long)
     return mm_token_type_ids.to(dtype=torch.long)
+
+
+@lru_cache(maxsize=32)
+def get_qwen_multimodal_settings(model_id_or_path):
+    model_type = AutoConfig.from_pretrained(model_id_or_path).model_type
+    if model_type in {"qwen3_vl", "qwen3_vl_moe", "qwen3_5", "qwen3_5_moe"}:
+        return model_type, 16, True
+    return model_type, 14, False
+
+
+def use_default_system_message(model_type):
+    return model_type in {"qwen2_vl", "qwen2_5_vl"}
+
+
+def chat_template_uses_reasoning_prefill(processor, model_type=None):
+    template = getattr(processor, "chat_template", None)
+    if not template and hasattr(processor, "tokenizer"):
+        template = getattr(processor.tokenizer, "chat_template", None)
+    template = template or ""
+    supported_model_types = {"qwen3_vl", "qwen3_5", "qwen3_5_moe"}
+    if model_type not in supported_model_types:
+        return False
+    return (
+        "reasoning_content" in template
+        and "<think>" in template
+        and "add_generation_prompt" in template
+        and "<|im_start|>assistant" in template
+    )
+
+
+def model_supports_optional_reasoning(model_type):
+    return model_type in {"qwen3_5", "qwen3_5_moe"}
+
+
+def format_assistant_response(
+    content,
+    reasoning=None,
+    *,
+    enable_reasoning=False,
+    use_reasoning_prefill=False,
+    use_closed_think_prefill=False,
+):
+    if use_closed_think_prefill:
+        return "<think>\n\n</think>\n\n", content.lstrip("\n")
+
+    if not enable_reasoning or not isinstance(reasoning, str) or not reasoning.strip():
+        return "", content
+
+    reasoning = reasoning.strip("\n")
+    content = content.lstrip("\n")
+
+    if use_reasoning_prefill:
+        return "<think>\n", f"{reasoning}\n</think>\n\n{content}"
+
+    return "", f"<think>\n{reasoning}\n</think>\n\n{content}"
 
 def get_image_info(image_path, min_pixel, max_pixel, width, height, image_patch_size):
     # Using this because of process_vision_info function

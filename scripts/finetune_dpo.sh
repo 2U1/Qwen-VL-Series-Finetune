@@ -2,6 +2,7 @@
 
 # MODEL_NAME="Qwen/Qwen2-VL-7B-Instruct"
 # MODEL_NAME="Qwen/Qwen2-VL-2B-Instruct"
+# MODEL_NAME="Qwen/Qwen3.5-4B"
 MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 # MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 
@@ -11,6 +12,11 @@ NUM_DEVICES=8
 GRAD_ACCUM_STEPS=$((GLOBAL_BATCH_SIZE / (BATCH_PER_DEVICE * NUM_DEVICES)))
 
 export PYTHONPATH=src:$PYTHONPATH
+
+# If you want to set the min pixels and max pixels for Qwen3-VL, You should set as (N * 32 * 32)
+
+# If you switch MODEL_NAME to a Qwen3.5 model, set `--disable_flash_attn2 True`.
+# Flash Attention 2 raised CUDA errors for the Qwen3.5 series in local tests, so SDPA is the stable path for now.
 
 deepspeed src/train/train_dpo.py \
     --dpo_loss "sigmoid" \

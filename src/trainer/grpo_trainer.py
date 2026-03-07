@@ -82,7 +82,7 @@ def _ensure_mm_token_type_ids_generate_compat(model):
     for candidate in _iter_generate_models(model):
         config = getattr(candidate, "config", None)
         model_type = getattr(config, "model_type", None)
-        if model_type not in {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}:
+        if model_type not in {"qwen2_vl", "qwen2_5_vl", "qwen3_5", "qwen3_5_moe", "qwen3_vl", "qwen3_vl_moe"}:
             continue
 
         try:

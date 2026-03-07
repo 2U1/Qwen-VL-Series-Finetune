@@ -8,9 +8,13 @@ from model.modeling_cls import (
     Qwen2VLForSequenceClassification,
     Qwen2_5_VLForSequenceClassification,
     Qwen3VLForSequenceClassification,
+    Qwen3_5ForSequenceClassification,
+    Qwen3_5MoeForSequenceClassification,
 )
 from train.monkey_patch_forward import (
     replace_qwen2_5_with_mixed_modality_forward,
+    replace_qwen3_5_moe_with_mixed_modality_forward,
+    replace_qwen3_5_with_mixed_modality_forward,
     replace_qwen3_vl_moe_with_mixed_modality_forward,
     replace_qwen3_with_mixed_modality_forward,
     replace_qwen_2_with_mixed_modality_forward,
@@ -20,6 +24,8 @@ from train.monkey_patch_vision import replace_qwen2_5_vision
 _GENERATION_MODEL_TYPES = {
     "qwen2_vl",
     "qwen2_5_vl",
+    "qwen3_5",
+    "qwen3_5_moe",
     "qwen3_vl",
     "qwen3_vl_moe",
 }
@@ -30,6 +36,8 @@ _PATCHERS = {
         replace_qwen2_5_with_mixed_modality_forward,
         replace_qwen2_5_vision,
     ),
+    "qwen3_5": (replace_qwen3_5_with_mixed_modality_forward,),
+    "qwen3_5_moe": (replace_qwen3_5_moe_with_mixed_modality_forward,),
     "qwen3_vl": (replace_qwen3_with_mixed_modality_forward,),
     "qwen3_vl_moe": (replace_qwen3_vl_moe_with_mixed_modality_forward,),
 }
@@ -37,6 +45,8 @@ _PATCHERS = {
 _SEQUENCE_CLASSIFICATION_MODEL_CLS = {
     "qwen2_vl": Qwen2VLForSequenceClassification,
     "qwen2_5_vl": Qwen2_5_VLForSequenceClassification,
+    "qwen3_5": Qwen3_5ForSequenceClassification,
+    "qwen3_5_moe": Qwen3_5MoeForSequenceClassification,
     "qwen3_vl": Qwen3VLForSequenceClassification,
 }
 
