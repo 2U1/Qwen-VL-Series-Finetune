@@ -6,8 +6,8 @@ import transformers
 import ujson as json
 from torch.utils.data import Dataset
 
-from src.params import DataArguments
-from src.constants import (
+from params import DataArguments
+from constants import (
     DEFAULT_IM_START_TOKEN,
     DEFAULT_IM_END_TOKEN,
     SYSTEM_MESSAGE,

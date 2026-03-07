@@ -3,7 +3,7 @@ import torch
 
 from qwen_vl_utils import process_vision_info
 
-from src.constants import (
+from constants import (
     DEFAULT_IMAGE_TOKEN,
     DEFAULT_VIDEO_TOKEN,
     LLAVA_IMAGE_TOKEN,

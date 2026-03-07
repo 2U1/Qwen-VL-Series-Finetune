@@ -22,7 +22,7 @@ from transformers.trainer_utils import EvalLoopOutput
 from torch.utils.data import DataLoader
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3
 
-from src.constants import IGNORE_INDEX
+from constants import IGNORE_INDEX
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):

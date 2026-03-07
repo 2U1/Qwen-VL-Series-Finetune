@@ -17,9 +17,30 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLPreTrainedModel,
     Qwen3VLModel
 )
+from train.monkey_patch_forward import (
+    replace_qwen2_5_with_mixed_modality_forward,
+    replace_qwen3_with_mixed_modality_forward,
+    replace_qwen_2_with_mixed_modality_forward,
+)
 from train.monkey_patch_vision import replace_qwen2_5_vision
 
+replace_qwen_2_with_mixed_modality_forward()
+replace_qwen2_5_with_mixed_modality_forward()
+replace_qwen3_with_mixed_modality_forward()
 replace_qwen2_5_vision()
+
+
+def _get_text_hidden_size(config):
+    hidden_size = getattr(config, "hidden_size", None)
+    if hidden_size is not None:
+        return hidden_size
+
+    text_config = getattr(config, "text_config", None)
+    hidden_size = getattr(text_config, "hidden_size", None)
+    if hidden_size is None:
+        raise AttributeError(f"{config.__class__.__name__} does not expose hidden_size or text_config.hidden_size")
+    return hidden_size
+
 
 class Qwen2VLForSequenceClassification(Qwen2VLPreTrainedModel):
     _checkpoint_conversion_mapping = {
@@ -36,10 +57,11 @@ class Qwen2VLForSequenceClassification(Qwen2VLPreTrainedModel):
         self.model = Qwen2VLModel(config)
         
         self.bridge = None
-        in_dim = config.hidden_size
+        hidden_size = _get_text_hidden_size(config)
+        in_dim = hidden_size
         if bridge_h > 0:
             self.bridge = nn.Sequential(
-                nn.Linear(config.hidden_size, bridge_h),
+                nn.Linear(hidden_size, bridge_h),
                 nn.GELU(),
                 nn.Dropout(bridge_p),
             )
@@ -210,10 +232,11 @@ class Qwen2_5_VLForSequenceClassification(Qwen2_5_VLPreTrainedModel):
         self.model = Qwen2_5_VLModel(config)
         
         self.bridge = None
-        in_dim = config.hidden_size
+        hidden_size = _get_text_hidden_size(config)
+        in_dim = hidden_size
         if bridge_h > 0:
             self.bridge = nn.Sequential(
-                nn.Linear(config.hidden_size, bridge_h),
+                nn.Linear(hidden_size, bridge_h),
                 nn.GELU(),
                 nn.Dropout(bridge_p),
             )

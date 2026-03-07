@@ -2,7 +2,7 @@ import argparse
 from threading import Thread
 import gradio as gr
 from PIL import Image
-from src.utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
+from utils import load_pretrained_model, get_model_name_from_path, disable_torch_init
 from transformers import TextIteratorStreamer
 from functools import partial
 import warnings

@@ -3,15 +3,11 @@ import torch
 from peft import LoraConfig, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser, AutoConfig
-from src.trainer import QwenCLSTrainer
-from src.model import (
-    Qwen2VLForSequenceClassification,
-    Qwen2_5_VLForSequenceClassification,
-    Qwen3VLForSequenceClassification,
-)
-from src.dataset import make_classification_data_module
-from src.loss import get_loss_function
-from src.params import DataArguments, ModelArguments, CLSArguments
+from trainer import QwenCLSTrainer
+from model.load_model import load_qwen_vl_sequence_classification_model
+from dataset import make_classification_data_module
+from loss import get_loss_function
+from params import DataArguments, ModelArguments, CLSArguments
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
 import pathlib
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
@@ -137,32 +133,13 @@ def train():
     cfg.mlp_head_dropout = training_args.mlp_head_dropout
     cfg.num_labels = training_args.num_labels
 
-    if cfg.model_type == "qwen2_5_vl":
-        model = Qwen2_5_VLForSequenceClassification.from_pretrained(
-            model_args.model_id,
-            config=cfg,
-            torch_dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
-            **bnb_model_from_pretrained_args
-        )
-    elif cfg.model_type == "qwen3_vl":
-        model = Qwen3VLForSequenceClassification.from_pretrained(
-            model_args.model_id,
-            config=cfg,
-            torch_dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
-            **bnb_model_from_pretrained_args
-        )
-    elif cfg.model_type == "qwen2_vl":
-        model = Qwen2VLForSequenceClassification.from_pretrained(
-            model_args.model_id,
-            config=cfg,
-            torch_dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
-            **bnb_model_from_pretrained_args
-        )
-    else:
-        raise ValueError(f"Unsupported model_type for classification: {cfg.model_type}")
+    model = load_qwen_vl_sequence_classification_model(
+        model_args.model_id,
+        config=cfg,
+        torch_dtype=compute_dtype,
+        attn_implementation="sdpa" if training_args.disable_flash_attn2 else "flash_attention_2",
+        **bnb_model_from_pretrained_args,
+    )
 
     model.config.use_cache = False
     model.config.num_labels = training_args.num_labels

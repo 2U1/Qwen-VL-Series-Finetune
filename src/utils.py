@@ -3,16 +3,12 @@ from peft import PeftModel
 import torch
 from transformers import (
     BitsAndBytesConfig, 
-    Qwen2VLForConditionalGeneration, 
     AutoProcessor, 
     AutoConfig, 
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-    Qwen3VLMoeForConditionalGeneration
 )
+from model.load_model import load_qwen_vl_generation_model
 import warnings
 import os
-import json
 import importlib
 import inspect
 from types import ModuleType
@@ -46,7 +42,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         kwargs['torch_dtype'] = torch.float16
 
     if use_flash_attn:
-        kwargs['_attn_implementation'] = 'flash_attention_2'
+        kwargs['attn_implementation'] = 'flash_attention_2'
 
     if is_lora_model(model_path) and model_base is None:
         warnings.warn('There is `lora` in model name but no `model_base` is provided. If you are loading a LoRA model, please provide the `model_base` argument.')
@@ -55,15 +51,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         if hasattr(lora_cfg_pretrained, 'quantization_config'):
             del lora_cfg_pretrained.quantization_config
         processor = AutoProcessor.from_pretrained(model_base)
-        print('Loading Qwen2-VL from base model...')
-        if lora_cfg_pretrained.model_type == "qwen3_vl_moe":
-            model = Qwen3VLMoeForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-        elif lora_cfg_pretrained.model_type == "qwen3_vl":
-            model = Qwen3VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-        elif lora_cfg_pretrained.model_type == "qwen2_5_vl":
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
-        else:
-            model = Qwen2VLForConditionalGeneration.from_pretrained(model_base, low_cpu_mem_usage=True, config=lora_cfg_pretrained, **kwargs)
+        print('Loading base Qwen-VL model...')
+        model = load_qwen_vl_generation_model(
+            model_base,
+            low_cpu_mem_usage=True,
+            config=lora_cfg_pretrained,
+            **kwargs,
+        )
             
         token_num, tokem_dim = model.lm_head.out_features, model.lm_head.in_features
         if model.lm_head.weight.shape[0] != token_num:
@@ -87,21 +81,15 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
 
     else:
         print(f"Loading model from {model_path} as a standard model. Adapter files were not found, so it can't be merged")
-        config_path = Path(model_path) / 'config.json'
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-
         processor = AutoProcessor.from_pretrained(model_path)
-        
-        architecture = config.get("model_type", [None])[0]
-        if "qwen3_vl_moe" in architecture:
-            model = Qwen3VLMoeForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
-        elif "qwen3_vl" in architecture:
-            model = Qwen3VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
-        elif "qwen2_5_vl" in architecture:
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
-        else:
-            model = Qwen2VLForConditionalGeneration.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+        config = AutoConfig.from_pretrained(model_path)
+
+        model = load_qwen_vl_generation_model(
+            model_path,
+            low_cpu_mem_usage=True,
+            config=config,
+            **kwargs,
+        )
 
     return processor, model
 

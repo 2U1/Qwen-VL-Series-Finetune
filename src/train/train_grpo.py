@@ -5,27 +5,16 @@ import ast
 import pathlib
 from transformers import (
     AutoProcessor, 
-    AutoConfig,
     BitsAndBytesConfig, 
-    Qwen2VLForConditionalGeneration, 
     HfArgumentParser, 
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-    Qwen3VLMoeForConditionalGeneration
 )
+from model.load_model import load_qwen_vl_generation_model
 
-from src.trainer import QwenGRPOTrainer
-from src.dataset import make_grpo_data_module
-from src.params import DataArguments, ModelArguments, GRPOArguments
+from trainer import QwenGRPOTrainer
+from dataset import make_grpo_data_module
+from params import DataArguments, ModelArguments, GRPOArguments
 from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
-from monkey_patch_forward import (
-    replace_qwen2_5_with_mixed_modality_forward, 
-    replace_qwen_2_with_mixed_modality_forward,
-    replace_qwen3_with_mixed_modality_forward,
-    replace_qwen3_vl_moe_with_mixed_modality_forward
-)
-from monkey_patch_vision import replace_qwen2_5_vision
-from src.utils import  load_reward_funcs
+from utils import load_reward_funcs
 
 local_rank = None
 
@@ -138,44 +127,12 @@ def train():
             )
         ))
 
-    config = AutoConfig.from_pretrained(model_args.model_id)
-
-    if config.model_type == "qwen3_vl_moe":
-        replace_qwen3_vl_moe_with_mixed_modality_forward()
-        model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-            model_args.model_id,
-            dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
-            **bnb_model_from_pretrained_args
-        )
-
-    elif config.model_type == "qwen3_vl":
-        replace_qwen3_with_mixed_modality_forward()
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            model_args.model_id,
-            dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
-            **bnb_model_from_pretrained_args
-        )
-
-    elif config.model_type == "qwen2_5_vl":
-        replace_qwen2_5_with_mixed_modality_forward()
-        replace_qwen2_5_vision()
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_args.model_id,
-            dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-            **bnb_model_from_pretrained_args
-        )
-        
-    else:
-        replace_qwen_2_with_mixed_modality_forward()
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_args.model_id,
-            dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-            **bnb_model_from_pretrained_args
-        )
+    model = load_qwen_vl_generation_model(
+        model_args.model_id,
+        dtype=compute_dtype,
+        attn_implementation="sdpa" if training_args.disable_flash_attn2 else "flash_attention_2",
+        **bnb_model_from_pretrained_args,
+    )
 
 
     model.config.use_cache = False
