@@ -1,12 +1,23 @@
 import re
-from math_verify import LatexExtractionConfig, parse, verify
-from latex2sympy2_extended import NormalizationConfig
+
+try:
+    from math_verify import LatexExtractionConfig, parse, verify
+    from latex2sympy2_extended import NormalizationConfig
+except ImportError:
+    LatexExtractionConfig = None
+    NormalizationConfig = None
+    parse = None
+    verify = None
 
 def accuracy_reward(completions, assistant, **kwargs):
     """Reward function that checks if the completion is correct using either symbolic verification or exact string matching."""
     rewards = []
 
     for completion, sol in zip(completions, assistant):
+        if parse is None or verify is None or LatexExtractionConfig is None or NormalizationConfig is None:
+            rewards.append(float(completion.strip().lower() == sol.strip().lower()))
+            continue
+
         try:
             gold_parsed = parse(sol, extraction_mode="first_match")
         except Exception as e:

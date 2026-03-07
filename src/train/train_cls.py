@@ -157,6 +157,10 @@ def train():
         model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
         from peft import prepare_model_for_kbit_training
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing, gradient_checkpointing_kwargs={"use_reentrant": True})
+        if not training_args.lora_enable:
+            # This wrapper has a trainable classification head even without PEFT adapters.
+            # Mark it so Trainer does not treat it as a purely-quantized frozen base model.
+            model._hf_peft_config_loaded = True
     
     if training_args.gradient_checkpointing:
         model.enable_input_require_grads()
@@ -223,6 +227,12 @@ def train():
     
     samples_per_class = data_module.pop("samples_per_class")
 
+    if training_args.use_liger_kernel:
+        rank0_print("Disabling Liger kernel for sequence classification wrappers.")
+        training_args.use_liger_kernel = False
+        if hasattr(training_args, "liger_kernel_config"):
+            training_args.liger_kernel_config = None
+
     loss_fn = get_loss_function(training_args, samples_per_class=samples_per_class)
     model.loss_fn = loss_fn.to(model.dtype if hasattr(model, "dtype") else torch.float32)
 
@@ -267,6 +277,8 @@ def train():
             model.save_pretrained(training_args.output_dir, state_dict=state_dict)
             torch.save(non_lora_state_dict, os.path.join(training_args.output_dir, "non_lora_state_dict.bin"))
     else:
+        if training_args.bits in [4, 8] and getattr(model, "_hf_peft_config_loaded", False):
+            model._hf_peft_config_loaded = False
         safe_save_model_for_hf_trainer(trainer, output_dir=training_args.output_dir)
 
 if __name__ == "__main__":

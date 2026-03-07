@@ -41,6 +41,12 @@ _SEQUENCE_CLASSIFICATION_MODEL_CLS = {
 }
 
 
+def get_qwen_vl_generation_backbone(model):
+    if not hasattr(model, "model"):
+        raise TypeError(f"Unsupported generation model wrapper: {type(model)!r}")
+    return model.model
+
+
 def apply_qwen_vl_monkey_patches(model_type: str) -> str:
     try:
         patchers = _PATCHERS[model_type]

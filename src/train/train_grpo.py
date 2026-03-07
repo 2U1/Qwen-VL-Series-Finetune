@@ -8,7 +8,7 @@ from transformers import (
     BitsAndBytesConfig, 
     HfArgumentParser, 
 )
-from model.load_model import load_qwen_vl_generation_model
+from model.load_model import get_qwen_vl_generation_backbone, load_qwen_vl_generation_model
 
 from trainer import QwenGRPOTrainer
 from dataset import make_grpo_data_module
@@ -44,35 +44,39 @@ def set_requires_grad(parameters, requires_grad):
         p.requires_grad = requires_grad
 
 def configure_vision_tower(model, training_args, compute_dtype, device):
-    vision_tower = model.visual
+    backbone = get_qwen_vl_generation_backbone(model)
+    vision_tower = backbone.visual
     vision_tower.to(dtype=compute_dtype, device=device)
 
-    vision_model_params = model.visual.parameters()
+    vision_model_params = backbone.visual.parameters()
     set_requires_grad(vision_model_params, not training_args.freeze_vision_tower)
     
     # Handle merger specifically
-    merger_params = model.visual.merger.parameters()
+    merger_params = backbone.visual.merger.parameters()
     set_requires_grad(merger_params, not training_args.freeze_merger)
 
-    if hasattr(model.visual, "deepstack_merger_list"):
-        deepstack_merger_list_params = model.visual.deepstack_merger_list.parameters()
+    if hasattr(backbone.visual, "deepstack_merger_list"):
+        deepstack_merger_list_params = backbone.visual.deepstack_merger_list.parameters()
         set_requires_grad(deepstack_merger_list_params, not training_args.freeze_merger)
 
 def configure_llm(model, training_args):
+    backbone = get_qwen_vl_generation_backbone(model)
     lm_head = model.lm_head.parameters()
     set_requires_grad(lm_head, not training_args.freeze_llm)
 
-    llm_params = model.language_model.parameters()
+    llm_params = backbone.language_model.parameters()
     set_requires_grad(llm_params, not training_args.freeze_llm)
 
 def unfreeze_topk_layers(model, k_llm: int = 0, k_vis: int = 0):
-    if k_llm and hasattr(model, "language_model") and hasattr(model.language_model, "layers"):
-        for layer in model.language_model.layers[-k_llm:]:
+    backbone = get_qwen_vl_generation_backbone(model)
+
+    if k_llm and hasattr(backbone, "language_model") and hasattr(backbone.language_model, "layers"):
+        for layer in backbone.language_model.layers[-k_llm:]:
             for p in layer.parameters():
                 p.requires_grad = True
 
-    if k_vis and hasattr(model, "visual") and hasattr(model.visual, "blocks"):
-        for blk in model.visual.blocks[-k_vis:]:
+    if k_vis and hasattr(backbone, "visual") and hasattr(backbone.visual, "blocks"):
+        for blk in backbone.visual.blocks[-k_vis:]:
             for p in blk.parameters():
                 p.requires_grad = True
 
@@ -197,7 +201,9 @@ def train():
                                               processor=processor,
                                               data_args=data_args)
 
-    reward_funcs = load_reward_funcs("src.train.reward_funcs")
+    reward_funcs = load_reward_funcs("train.reward_funcs")
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
 
     trainer = QwenGRPOTrainer(
         model=model,

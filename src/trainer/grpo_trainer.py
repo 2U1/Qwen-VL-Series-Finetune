@@ -1,6 +1,8 @@
 import os
+import inspect
 import torch
 from pathlib import Path
+from types import MethodType
 import torch.nn as nn
 from typing import Any
 
@@ -51,11 +53,67 @@ def _identity_collator(features):
     return features
 
 
+def _iter_generate_models(model):
+    seen = set()
+    stack = [model]
+
+    while stack:
+        candidate = stack.pop()
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        yield candidate
+
+        if hasattr(candidate, "module"):
+            stack.append(candidate.module)
+
+        if is_peft_model(candidate):
+            try:
+                stack.append(candidate.get_base_model())
+            except Exception:
+                pass
+
+        base_model = getattr(candidate, "base_model", None)
+        if base_model is not None:
+            stack.append(base_model)
+
+
+def _ensure_mm_token_type_ids_generate_compat(model):
+    for candidate in _iter_generate_models(model):
+        config = getattr(candidate, "config", None)
+        model_type = getattr(config, "model_type", None)
+        if model_type not in {"qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_moe"}:
+            continue
+
+        try:
+            forward_sig = inspect.signature(candidate.forward)
+        except (TypeError, ValueError):
+            continue
+
+        if "mm_token_type_ids" in forward_sig.parameters:
+            continue
+
+        # Liger replaces the multimodal forward without exposing `mm_token_type_ids`
+        # in the Python signature. Generation validation then rejects the kwarg
+        # before it reaches the underlying Qwen-VL model.
+        original_forward = candidate.forward
+
+        def forward_with_mm_token_type_ids(self, *args, mm_token_type_ids=None, **kwargs):
+            if mm_token_type_ids is not None:
+                kwargs["mm_token_type_ids"] = mm_token_type_ids
+            return original_forward(*args, **kwargs)
+
+        candidate.forward = MethodType(forward_with_mm_token_type_ids, candidate)
+
+
 class QwenGRPOTrainer(GRPOTrainer):
     def __init__(self, *args, **kwargs):
         super(QwenGRPOTrainer, self).__init__(*args, **kwargs)
         # Override data_collator to prevent any data processing
         self.data_collator = _identity_collator
+        _ensure_mm_token_type_ids_generate_compat(self.model)
+        _ensure_mm_token_type_ids_generate_compat(getattr(self, "model_wrapped", None))
+        _ensure_mm_token_type_ids_generate_compat(getattr(self, "ref_model", None))
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
@@ -134,6 +192,7 @@ class QwenGRPOTrainer(GRPOTrainer):
             torch.no_grad(),
             FSDP.summon_full_params(self.model_wrapped, recurse=False) if self.is_fsdp_enabled else nullcontext(),
         ):
+            _ensure_mm_token_type_ids_generate_compat(unwrapped_model)
             prompt_completion_ids = unwrapped_model.generate(
                 **generate_inputs, generation_config=self.generation_config, disable_compile=True
             )

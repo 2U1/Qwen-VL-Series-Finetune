@@ -145,6 +145,11 @@ class ClassificationDataset(Dataset):
         )
 
         image_inputs, video_inputs, video_kwargs = process_vision_info(user_prompt, return_video_kwargs=True)
+        video_kwargs = {
+            key: value
+            for key, value in video_kwargs.items()
+            if value is not None and value != []
+        }
 
         data_dict = self.processor(
             text=text,

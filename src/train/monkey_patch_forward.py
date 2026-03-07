@@ -11,6 +11,24 @@ from transformers.utils import TransformersKwargs
 from transformers.processing_utils import Unpack
 from transformers.cache_utils import Cache
 
+
+def _flatten_vision_features(vision_outputs):
+    pooled = getattr(vision_outputs, "pooler_output", vision_outputs)
+    if isinstance(pooled, torch.Tensor):
+        return pooled
+    if isinstance(pooled, (tuple, list)):
+        return torch.cat(list(pooled), dim=0)
+    raise TypeError(f"Unsupported vision output type: {type(vision_outputs)!r}")
+
+
+def _get_deepstack_features(vision_outputs):
+    if hasattr(vision_outputs, "deepstack_features"):
+        return vision_outputs.deepstack_features
+    if isinstance(vision_outputs, (tuple, list)) and len(vision_outputs) == 2:
+        return vision_outputs[1]
+    return None
+
+
 def replace_qwen_2_with_mixed_modality_forward():
     transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLModel.forward = qwen2_mixed_modality_forward
 
@@ -54,22 +72,25 @@ def qwen3_vl_moe_mixed_modality_forward(
         dummy_pixel = torch.zeros(1024, 1536).to(self.visual.device)
         dummy_grid = torch.tensor([[1, 32, 32]]).to(self.visual.device)
 
-        image_embeds, dummy_deepstack = self.get_image_features(dummy_pixel, dummy_grid)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_outputs = self.get_image_features(dummy_pixel, dummy_grid, return_dict=True)
+        dummy_deepstack = _get_deepstack_features(image_outputs)
+        image_embeds = _flatten_vision_features(image_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         
         inputs_embeds += image_embeds.mean() * 0
 
     if pixel_values is not None:
-        image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_outputs = self.get_image_features(pixel_values, image_grid_thw, return_dict=True)
+        deepstack_image_embeds = _get_deepstack_features(image_outputs)
+        image_embeds = _flatten_vision_features(image_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         image_mask, _ = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
         )
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-        video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        video_outputs = self.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True)
+        deepstack_video_embeds = _get_deepstack_features(video_outputs)
+        video_embeds = _flatten_vision_features(video_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         _, video_mask = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
         )
@@ -171,22 +192,25 @@ def qwen3_vl_mixed_modality_forward(
         dummy_pixel = torch.zeros(1024, 1536).to(self.visual.device)
         dummy_grid = torch.tensor([[1, 32, 32]]).to(self.visual.device)
 
-        image_embeds, dummy_deepstack = self.get_image_features(dummy_pixel, dummy_grid)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_outputs = self.get_image_features(dummy_pixel, dummy_grid, return_dict=True)
+        dummy_deepstack = _get_deepstack_features(image_outputs)
+        image_embeds = _flatten_vision_features(image_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         
         inputs_embeds += image_embeds.mean() * 0
 
     if pixel_values is not None:
-        image_embeds, deepstack_image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_outputs = self.get_image_features(pixel_values, image_grid_thw, return_dict=True)
+        deepstack_image_embeds = _get_deepstack_features(image_outputs)
+        image_embeds = _flatten_vision_features(image_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         image_mask, _ = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
         )
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        video_embeds, deepstack_video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-        video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        video_outputs = self.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True)
+        deepstack_video_embeds = _get_deepstack_features(video_outputs)
+        video_embeds = _flatten_vision_features(video_outputs).to(inputs_embeds.device, inputs_embeds.dtype)
         _, video_mask = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
         )
@@ -297,25 +321,24 @@ def qwen2_5_mixed_modality_forward(
         dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
         dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
 
-        image_embeds = self.get_image_features(dummy_pixel, dummy_grid)
+        image_embeds = self.get_image_features(dummy_pixel, dummy_grid, return_dict=True)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
         # This could avoid deepspeed error when some batch only has texts.
-        if isinstance(image_embeds, (tuple, list)):
-            image_embeds = torch.cat(list(image_embeds), dim=0)  # (sum_tokens, hidden)
+        image_embeds = _flatten_vision_features(image_embeds)
         inputs_embeds += image_embeds.mean() * 0
 
     if pixel_values is not None:
-        image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_embeds = self.get_image_features(pixel_values, image_grid_thw, return_dict=True)
+        image_embeds = _flatten_vision_features(image_embeds).to(inputs_embeds.device, inputs_embeds.dtype)
         image_mask, _ = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
         )
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-        video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True)
+        video_embeds = _flatten_vision_features(video_embeds).to(inputs_embeds.device, inputs_embeds.dtype)
         _, video_mask = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
         )
@@ -401,25 +424,24 @@ def qwen2_mixed_modality_forward(
         dummy_pixel = torch.zeros(784, 1176).to(self.visual.get_device())
         dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.get_device())
 
-        image_embeds = self.get_image_features(dummy_pixel, dummy_grid)
+        image_embeds = self.get_image_features(dummy_pixel, dummy_grid, return_dict=True)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
         # This could avoid deepspeed error when some batch only has texts.
-        if isinstance(image_embeds, (tuple, list)):
-            image_embeds = torch.cat(list(image_embeds), dim=0)  # (sum_tokens, hidden)
+        image_embeds = _flatten_vision_features(image_embeds)
         inputs_embeds += image_embeds.mean() * 0
 
     if pixel_values is not None:
-        image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-        image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        image_embeds = self.get_image_features(pixel_values, image_grid_thw, return_dict=True)
+        image_embeds = _flatten_vision_features(image_embeds).to(inputs_embeds.device, inputs_embeds.dtype)
         image_mask, _ = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
         )
         inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
     if pixel_values_videos is not None:
-        video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-        video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+        video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True)
+        video_embeds = _flatten_vision_features(video_embeds).to(inputs_embeds.device, inputs_embeds.dtype)
         _, video_mask = self.get_placeholder_mask(
             input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
         )

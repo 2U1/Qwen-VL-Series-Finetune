@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 def replace_qwen2_5_vision():
     transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VisionTransformerPretrainedModel = Qwen2_5_VisionTransformerPretrainedModelWithPatchedWindow
@@ -121,7 +122,7 @@ class Qwen2_5_VisionTransformerPretrainedModelWithPatchedWindow(Qwen2_5_VLPreTra
         return window_index, cu_window_seqlens
 
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs) -> tuple | BaseModelOutputWithPooling:
         hidden_states = self.patch_embed(hidden_states)
         seq_len, dim = hidden_states.size()
 
@@ -172,10 +173,13 @@ class Qwen2_5_VisionTransformerPretrainedModelWithPatchedWindow(Qwen2_5_VLPreTra
             else:
                 hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens_now, position_embeddings=position_embeddings)
 
-        hidden_states = self.merger(hidden_states)
+        merged_hidden_states = self.merger(hidden_states)
 
         reverse_indices = torch.empty_like(window_index_dev)
         reverse_indices.scatter_(0, window_index_dev, torch.arange(window_index_dev.numel(), dtype=torch.long, device=window_index_dev.device))
-        hidden_states = hidden_states.index_select(0, reverse_indices)
+        merged_hidden_states = merged_hidden_states.index_select(0, reverse_indices)
 
-        return hidden_states
+        return BaseModelOutputWithPooling(
+            last_hidden_state=hidden_states,
+            pooler_output=merged_hidden_states,
+        )
