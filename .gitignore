@@ -169,3 +169,4 @@ logs/*.log
 
 testing.ipynb
 .vscode/*
+data/
