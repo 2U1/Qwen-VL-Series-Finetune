@@ -1,6 +1,6 @@
 import os
 import torch
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, TaskType, get_peft_model
 import ast
 from transformers import AutoProcessor, BitsAndBytesConfig, HfArgumentParser, AutoConfig
 from trainer import QwenCLSTrainer
@@ -182,7 +182,7 @@ def train():
             target_modules=find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
-            task_type="CAUSAL_LM",
+            task_type=TaskType.SEQ_CLS,
         )
         rank0_print("Adding LoRA to the model...")
         model = get_peft_model(model, peft_config)
