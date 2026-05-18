@@ -14,6 +14,7 @@ This repository contains a script for training [Qwen2-VL](https://huggingface.co
 
 ## Update
 
+- [2026/05/18] 🔥**Upgrade to `liger_kernel==0.8.0`.** Liger 0.8.0 adds official patches for `qwen3_5` / `qwen3_5_moe` and ships **LigerExperts**, a fused MoE expert kernel that auto-accelerates `qwen3_vl_moe` and `qwen3_5_moe` under `--use_liger_kernel True`. The 0.7-era hardcoded fallback that force-disabled Liger for Qwen3.5 in SFT/DPO/GRPO has been removed, and the `mm_token_type_ids` GRPO wrapper is now skipped automatically on Liger ≥ 0.8.0 (kept as a no-op shim for older installs).
 - [2026/03/07] 🔥**Supports reasoning mode training for Qwen3-VL and Qwen3.5**
 - [2026/03/07] 🔥**Supports Qwen3.5 Series.**
 - [2026/03/07] Supports Qwen3-VL classification
@@ -385,7 +386,8 @@ Adding the new domain-specific data on top of the general data from open-source 
 
 ## Supervised Fine Tuning
 
-⚠️**For Qwen3-VL models, using liger-kernel with full fine-tuning is awfully slow. I recommend turning off liger-kernel or use zero2 with full-finetuning.**<br><br>
+⚠️**For dense Qwen3-VL models, full fine-tuning with liger-kernel can be slow. Consider turning off liger-kernel or switching to zero2 in that case.**<br>
+✅**Qwen3-VL-MoE and Qwen3.5-MoE use Liger 0.8.0's fused `LigerExperts` kernel automatically, so leaving `--use_liger_kernel True` is recommended for MoE variants.**<br><br>
 
 **Tip:** You could use `adamw_bnb_8bit` for optimizer to save memory.
 
