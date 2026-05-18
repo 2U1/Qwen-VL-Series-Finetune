@@ -133,6 +133,23 @@ class QwenGRPOTrainer(GRPOTrainer):
         _ensure_mm_token_type_ids_generate_compat(self.model)
         _ensure_mm_token_type_ids_generate_compat(getattr(self, "model_wrapped", None))
         _ensure_mm_token_type_ids_generate_compat(getattr(self, "ref_model", None))
+        self._apply_liger_grpo_loss_type_override()
+
+    def _apply_liger_grpo_loss_type_override(self) -> None:
+        """If the user passed --liger_grpo_loss_type, swap the loss variant on
+        the LigerFusedLinearGRPOLoss instance that TRL's GRPOTrainer set up.
+        Available types depend on liger-kernel >= 0.8.0:
+        'grpo', 'bnpo', 'dr_grpo', 'dapo', 'cispo', 'sapo', 'luspo'."""
+        desired = getattr(self.args, "liger_grpo_loss_type", None)
+        if not desired:
+            return
+        liger_grpo_loss = getattr(self, "liger_grpo_loss", None)
+        if liger_grpo_loss is None or not hasattr(liger_grpo_loss, "loss_type"):
+            return
+        previous = liger_grpo_loss.loss_type
+        liger_grpo_loss.loss_type = desired
+        if getattr(self, "accelerator", None) is None or self.accelerator.is_main_process:
+            print(f"[QwenGRPOTrainer] liger_grpo_loss.loss_type: {previous!r} -> {desired!r}")
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.

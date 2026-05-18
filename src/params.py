@@ -271,6 +271,17 @@ class GRPOArguments(GRPOConfigTRL):
     max_completion_length: int = 256
     max_prompt_length: int = 512
     use_liger_loss: bool = True
+    liger_grpo_loss_type: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Override the Liger GRPO loss variant when --use_liger_loss is True. "
+                "liger-kernel 0.8.0 supports: 'grpo', 'bnpo', 'dr_grpo', 'dapo' (default), "
+                "'cispo', 'sapo', 'luspo'. When None, the underlying LigerFusedLinearGRPOLoss "
+                "default is used. Note: 'dr_grpo' also requires --max_completion_length."
+            )
+        },
+    )
 
 
 @dataclass

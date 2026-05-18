@@ -705,6 +705,7 @@ Most of the training arugments are same as SFT, but few other arguments are adde
 - `--max_completion_length` (int): Max length for the completion (default: 256)
 - `--max_prompt_length` (int): Max length for the prompt (default: 512)
 - `--beta` (float): KL Coefficient. (default: 0.04)
+- `--liger_grpo_loss_type` (str): When `--use_liger_loss True`, choose the GRPO loss variant exposed by liger-kernel 0.8.0. One of `grpo`, `bnpo`, `dr_grpo`, `dapo` (LigerFusedLinearGRPOLoss default), `cispo`, `sapo`, `luspo`. Defaults to `None`, which keeps Liger's built-in default. `dr_grpo` also requires `--max_completion_length`.
 
 </details>
 
