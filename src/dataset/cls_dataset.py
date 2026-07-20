@@ -94,7 +94,9 @@ class ClassificationDataset(Dataset):
         self.video_resized_h = data_args.video_resized_height
         self.fps = data_args.fps
         self.nframes = data_args.nframes
-        self.model_type, _, _ = get_qwen_multimodal_settings(self.model_id)
+        self.model_type, self.image_patch_size, self.return_video_metadata = get_qwen_multimodal_settings(
+            self.model_id
+        )
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -151,19 +153,37 @@ class ClassificationDataset(Dataset):
             user_prompt, tokenize=False, add_generation_prompt=True
         )
 
-        image_inputs, video_inputs, video_kwargs = process_vision_info(user_prompt, return_video_kwargs=True)
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            user_prompt,
+            return_video_kwargs=True,
+            return_video_metadata=self.return_video_metadata,
+            image_patch_size=self.image_patch_size,
+        )
+        video_metadata = None
+        if video_inputs is not None and self.return_video_metadata:
+            video_inputs, video_metadata = zip(*video_inputs)
+            video_inputs = list(video_inputs)
+            video_metadata = list(video_metadata)
+
         video_kwargs = {
             key: value
             for key, value in video_kwargs.items()
             if value is not None and value != []
         }
 
+        processor_kwargs = {
+            "return_tensors": "pt",
+            "do_resize": False,
+            **video_kwargs,
+        }
+        if video_metadata is not None:
+            processor_kwargs["video_metadata"] = video_metadata
+
         data_dict = self.processor(
             text=text,
             images=image_inputs,
             videos=video_inputs,
-            return_tensors="pt",
-            **video_kwargs
+            **processor_kwargs,
         )
         mm_token_type_ids = get_mm_token_type_ids(data_dict, data_dict["input_ids"])
 
