@@ -1,7 +1,7 @@
 # Fine-tuning Qwen-VL Series
 
 This repository contains a script for training [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct), [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct)
-and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using HuggingFace and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel).
+, [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) and [Qwen3.5](https://huggingface.co/Qwen/Qwen3.5-4B) with only using HuggingFace and [Liger-Kernel](https://github.com/linkedin/Liger-Kernel).
 
 ## Other projects
 
@@ -14,6 +14,7 @@ and [Qwen3-VL](https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking) with only using
 
 ## Update
 
+- [2026/05/18] 🔥**Upgrade to `liger_kernel==0.8.0`.** Liger 0.8.0 adds official patches for `qwen3_5` / `qwen3_5_moe` and ships **LigerExperts**, a fused MoE expert kernel that auto-accelerates `qwen3_vl_moe` and `qwen3_5_moe` under `--use_liger_kernel True`. The 0.7-era hardcoded fallback that force-disabled Liger for Qwen3.5 in SFT/DPO/GRPO has been removed, and the `mm_token_type_ids` GRPO wrapper is now skipped automatically on Liger ≥ 0.8.0 (kept as a no-op shim for older installs).
 - [2026/03/07] 🔥**Supports reasoning mode training for Qwen3-VL and Qwen3.5**
 - [2026/03/07] 🔥**Supports Qwen3.5 Series.**
 - [2026/03/07] Supports Qwen3-VL classification
@@ -385,7 +386,8 @@ Adding the new domain-specific data on top of the general data from open-source 
 
 ## Supervised Fine Tuning
 
-⚠️**For Qwen3-VL models, using liger-kernel with full fine-tuning is awfully slow. I recommend turning off liger-kernel or use zero2 with full-finetuning.**<br><br>
+⚠️**For dense Qwen3-VL models, full fine-tuning with liger-kernel can be slow. Consider turning off liger-kernel or switching to zero2 in that case.**<br>
+✅**Qwen3-VL-MoE and Qwen3.5-MoE use Liger 0.8.0's fused `LigerExperts` kernel automatically, so leaving `--use_liger_kernel True` is recommended for MoE variants.**<br><br>
 
 **Tip:** You could use `adamw_bnb_8bit` for optimizer to save memory.
 
@@ -703,6 +705,7 @@ Most of the training arugments are same as SFT, but few other arguments are adde
 - `--max_completion_length` (int): Max length for the completion (default: 256)
 - `--max_prompt_length` (int): Max length for the prompt (default: 512)
 - `--beta` (float): KL Coefficient. (default: 0.04)
+- `--liger_grpo_loss_type` (str): When `--use_liger_loss True`, choose the GRPO loss variant exposed by liger-kernel 0.8.0. One of `grpo`, `bnpo`, `dr_grpo`, `dapo` (LigerFusedLinearGRPOLoss default), `cispo`, `sapo`, `luspo`. Defaults to `None`, which keeps Liger's built-in default. `dr_grpo` also requires `--max_completion_length`.
 
 </details>
 

@@ -47,6 +47,23 @@ def _make_dummy_qwen3_visual_inputs(visual):
     return dummy_pixel, dummy_grid
 
 
+def _expand_video_grid_to_frames(video_grid_thw):
+    if video_grid_thw is None:
+        return None
+
+    frame_grids = []
+    for grid in video_grid_thw:
+        num_frames = int(grid[0].item())
+        per_frame_grid = grid.unsqueeze(0).expand(num_frames, -1).clone()
+        per_frame_grid[:, 0] = 1
+        frame_grids.append(per_frame_grid)
+
+    if not frame_grids:
+        return video_grid_thw
+
+    return torch.cat(frame_grids, dim=0)
+
+
 def replace_qwen_2_with_mixed_modality_forward():
     transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLModel.forward = qwen2_mixed_modality_forward
 
@@ -112,10 +129,11 @@ def _qwen3_5_mixed_modality_forward_impl(
         inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
     if position_ids is None:
+        rope_video_grid_thw = _expand_video_grid_to_frames(video_grid_thw)
         position_ids = self.compute_3d_position_ids(
             input_ids=input_ids,
             image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            video_grid_thw=rope_video_grid_thw,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -287,10 +305,11 @@ def qwen3_vl_moe_mixed_modality_forward(
         deepstack_visual_embeds = [t.narrow(0, 0, 0) for t in dummy_deepstack]
 
     if position_ids is None:
+        rope_video_grid_thw = _expand_video_grid_to_frames(video_grid_thw)
         position_ids = self.compute_3d_position_ids(
             input_ids=input_ids,
             image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            video_grid_thw=rope_video_grid_thw,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -405,10 +424,11 @@ def qwen3_vl_mixed_modality_forward(
         deepstack_visual_embeds = [t.narrow(0, 0, 0) for t in dummy_deepstack]
 
     if position_ids is None:
+        rope_video_grid_thw = _expand_video_grid_to_frames(video_grid_thw)
         position_ids = self.compute_3d_position_ids(
             input_ids=input_ids,
             image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
+            video_grid_thw=rope_video_grid_thw,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,

@@ -3,8 +3,10 @@ import inspect
 import torch
 from pathlib import Path
 from types import MethodType
-import torch.nn as nn
 from typing import Any
+
+import torch.nn as nn
+from packaging.version import Version
 
 import trl.import_utils as trl_import_utils
 from transformers.trainer import (
@@ -78,7 +80,24 @@ def _iter_generate_models(model):
             stack.append(base_model)
 
 
+def _liger_exposes_mm_token_type_ids() -> bool:
+    """liger-kernel >= 0.8.0 restored `mm_token_type_ids` on the patched VL forward
+    (see linkedin/Liger-Kernel#1120, #1140). Older releases drop it from the
+    signature so we still need the runtime wrapper below for them."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:
+        return False
+    try:
+        return Version(version("liger_kernel")) >= Version("0.8.0")
+    except PackageNotFoundError:
+        return False
+
+
 def _ensure_mm_token_type_ids_generate_compat(model):
+    if _liger_exposes_mm_token_type_ids():
+        return
+
     for candidate in _iter_generate_models(model):
         config = getattr(candidate, "config", None)
         model_type = getattr(config, "model_type", None)
@@ -93,9 +112,9 @@ def _ensure_mm_token_type_ids_generate_compat(model):
         if "mm_token_type_ids" in forward_sig.parameters:
             continue
 
-        # Liger replaces the multimodal forward without exposing `mm_token_type_ids`
-        # in the Python signature. Generation validation then rejects the kwarg
-        # before it reaches the underlying Qwen-VL model.
+        # Liger < 0.8.0 replaces the multimodal forward without exposing
+        # `mm_token_type_ids` in the Python signature. Generation validation
+        # then rejects the kwarg before it reaches the underlying Qwen-VL model.
         original_forward = candidate.forward
 
         def forward_with_mm_token_type_ids(self, *args, mm_token_type_ids=None, **kwargs):
@@ -114,6 +133,23 @@ class QwenGRPOTrainer(GRPOTrainer):
         _ensure_mm_token_type_ids_generate_compat(self.model)
         _ensure_mm_token_type_ids_generate_compat(getattr(self, "model_wrapped", None))
         _ensure_mm_token_type_ids_generate_compat(getattr(self, "ref_model", None))
+        self._apply_liger_grpo_loss_type_override()
+
+    def _apply_liger_grpo_loss_type_override(self) -> None:
+        """If the user passed --liger_grpo_loss_type, swap the loss variant on
+        the LigerFusedLinearGRPOLoss instance that TRL's GRPOTrainer set up.
+        Available types depend on liger-kernel >= 0.8.0:
+        'grpo', 'bnpo', 'dr_grpo', 'dapo', 'cispo', 'sapo', 'luspo'."""
+        desired = getattr(self.args, "liger_grpo_loss_type", None)
+        if not desired:
+            return
+        liger_grpo_loss = getattr(self, "liger_grpo_loss", None)
+        if liger_grpo_loss is None or not hasattr(liger_grpo_loss, "loss_type"):
+            return
+        previous = liger_grpo_loss.loss_type
+        liger_grpo_loss.loss_type = desired
+        if getattr(self, "accelerator", None) is None or self.accelerator.is_main_process:
+            print(f"[QwenGRPOTrainer] liger_grpo_loss.loss_type: {previous!r} -> {desired!r}")
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.

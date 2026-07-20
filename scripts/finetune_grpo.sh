@@ -12,6 +12,11 @@ export PYTHONPATH=src:$PYTHONPATH
 # If you switch MODEL_NAME to a Qwen3.5 model, set `--disable_flash_attn2 True`.
 # Flash Attention 2 raised CUDA errors for the Qwen3.5 series in local tests, so SDPA is the stable path for now.
 
+# Optional Liger GRPO loss variant (requires --use_liger_loss True and liger-kernel >= 0.8.0):
+#   --liger_grpo_loss_type <name>   where <name> is one of:
+#     grpo | bnpo | dr_grpo | dapo (default) | cispo | sapo | luspo
+# Note: dr_grpo additionally requires --max_completion_length to be set.
+
 deepspeed src/train/train_grpo.py \
     --deepspeed scripts/zero3.json \
     --use_liger_loss True \

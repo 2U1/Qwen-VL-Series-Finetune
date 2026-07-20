@@ -46,7 +46,7 @@ jupyter_client==8.6.3
 jupyter_core==5.7.2
 jupyterlab_widgets==3.0.14
 kiwisolver==1.4.9
-liger_kernel==0.7.0
+liger_kernel==0.8.0
 markdown-it-py==3.0.0
 MarkupSafe==2.1.5
 matplotlib==3.10.6
