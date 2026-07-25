@@ -8,7 +8,12 @@ from model.load_model import load_qwen_vl_sequence_classification_model
 from dataset import make_classification_data_module
 from loss import get_loss_function
 from params import DataArguments, ModelArguments, CLSArguments
-from train.train_utils import get_peft_state_maybe_zero_3, get_peft_state_non_lora_maybe_zero_3, safe_save_model_for_hf_trainer
+from train.train_utils import (
+    get_peft_state_maybe_zero_3,
+    get_peft_state_non_lora_maybe_zero_3,
+    patch_deepspeed_zero3_peft_hooks,
+    safe_save_model_for_hf_trainer,
+)
 import pathlib
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from transformers import EarlyStoppingCallback
@@ -175,15 +180,28 @@ def train():
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
 
     if training_args.lora_enable:
-        lora_namespan_exclude = training_args.lora_namespan_exclude
+        # Sequence-classification PEFT wrappers train and save the classifier
+        # head through modules_to_save. Targeting the same module with LoRA first
+        # creates an unsupported ModulesToSaveWrapper-over-LoraLayer stack.
+        classification_modules_to_save = ["score"]
+        if getattr(model, "bridge", None) is not None:
+            classification_modules_to_save.append("bridge")
+
+        lora_namespan_exclude = list(training_args.lora_namespan_exclude)
+        lora_namespan_exclude.extend(
+            ["classifier", *classification_modules_to_save]
+        )
         peft_config = LoraConfig(
             r=training_args.lora_rank,
             lora_alpha=training_args.lora_alpha,
             target_modules=find_target_linear_names(model, lora_namespan_exclude=lora_namespan_exclude, num_lora_modules=training_args.num_lora_modules),
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias,
+            modules_to_save=classification_modules_to_save,
             task_type=TaskType.SEQ_CLS,
         )
+        if patch_deepspeed_zero3_peft_hooks():
+            rank0_print("Applied the DeepSpeed ZeRO-3 compatibility fix for PEFT modules_to_save wrappers.")
         rank0_print("Adding LoRA to the model...")
         model = get_peft_model(model, peft_config)
 
