@@ -61,6 +61,10 @@ class SupervisedDataset(Dataset):
         self.video_resized_h = data_args.video_resized_height
         self.fps = data_args.fps
         self.nframes = data_args.nframes
+        # Upper bound on the per-sample token length. Over-length samples are right
+        # truncated so a single pathological example cannot blow up O(seq^2) attention
+        # memory. Defaults to the Qwen context size when the caller does not set it.
+        self.max_seq_length = getattr(data_args, "max_seq_length", None) or 32768
 
         self.model_type, self.image_patch_size, self.return_video_metadata = get_qwen_multimodal_settings(
             self.model_id
@@ -277,8 +281,28 @@ class SupervisedDataset(Dataset):
         labels = torch.cat(all_labels, dim=0).to(torch.long)
         mm_token_type_ids = torch.cat(all_mm_token_type_ids, dim=0).to(torch.long)
 
-        # eos_token_id = processor.tokenizer.convert_tokens_to_ids(DEFAULT_IM_END_TOKEN)
-        # input_ids, labels = truncate_sequence(input_ids, labels, self.max_length, eos_token_id)
+        # Enforce `--max_seq_length`. Only trailing TEXT is trimmed: the image/video
+        # placeholder tokens must keep matching the rows in pixel_values / image_grid_thw,
+        # so a sample whose media tokens already reach the limit is left untouched rather
+        # than silently desynchronised.
+        if input_ids.size(0) > self.max_seq_length:
+            mm_positions = (mm_token_type_ids != 0).nonzero(as_tuple=False)
+            last_mm_idx = int(mm_positions[-1]) if mm_positions.numel() > 0 else -1
+            # `get_mm_token_type_ids` returns all zeros whenever the processor does not
+            # produce `mm_token_type_ids`, so locate the placeholders by token id too --
+            # otherwise the guard silently does nothing on those models and the truncation
+            # cuts into the media tokens.
+            for media_token in (DEFAULT_IMAGE_TOKEN, DEFAULT_VIDEO_TOKEN):
+                media_token_id = processor.tokenizer.convert_tokens_to_ids(media_token)
+                if media_token_id is None or media_token_id < 0:
+                    continue
+                hits = (input_ids == media_token_id).nonzero(as_tuple=False)
+                if hits.numel() > 0:
+                    last_mm_idx = max(last_mm_idx, int(hits[-1]))
+            if self.max_seq_length > last_mm_idx + 1:
+                input_ids = input_ids[: self.max_seq_length]
+                labels = labels[: self.max_seq_length]
+                mm_token_type_ids = mm_token_type_ids[: self.max_seq_length]
 
         attention_mask = (input_ids > -1000000).to(torch.long)
 
