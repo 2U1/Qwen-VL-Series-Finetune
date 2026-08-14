@@ -158,7 +158,10 @@ class DPODataset(Dataset):
             all_input_ids.append(system_message_input_ids.squeeze(0))
             all_prompt_mm_token_type_ids.append(torch.zeros_like(system_message_input_ids, dtype=torch.long).squeeze(0))
 
-        user_prompt = replace_image_tokens(sources["prompt"], is_video=is_video)
+        user_prompt = replace_image_tokens(
+            sources["prompt"], is_video=is_video,
+            preserve_whitespace=getattr(self.data_args, 'preserve_media_token_whitespace', False),
+        )
         chosen_response = sources["chosen"]
         rejected_response = sources["rejected"]
         chosen_reasoning = sources.get("chosen_reasoning")

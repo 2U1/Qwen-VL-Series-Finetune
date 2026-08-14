@@ -16,22 +16,36 @@ from constants import (
 )
 
 
-def replace_image_tokens(input_string, is_video=False):
+def replace_image_tokens(input_string, is_video=False, preserve_whitespace=False):
     if is_video:
-        pattern = r'\n*' + re.escape(LLAVA_VIDEO_TOKEN) + r'\n*'
+        token = LLAVA_VIDEO_TOKEN
         replacement = VISION_START_TOKEN + DEFAULT_VIDEO_TOKEN + VISION_END_TOKEN
     else:
-        pattern = r'\n*' + re.escape(LLAVA_IMAGE_TOKEN) + r'\n*'
+        token = LLAVA_IMAGE_TOKEN
         replacement = VISION_START_TOKEN + DEFAULT_IMAGE_TOKEN + VISION_END_TOKEN
 
-    return re.sub(pattern, replacement, input_string)
+    # Default: also swallow the newlines around the token, which matches how the official
+    # Qwen chat template renders a content list and keeps the classic LLaVA
+    # "<image>\nQuestion" datasets rendering exactly as they always have.
+    #
+    # With preserve_whitespace the author's layout is kept verbatim. This matters for
+    # structured multi-image prompts -- "Image 1: <image>\nImage 2: <image>\n\nTask: ..."
+    # otherwise collapses to "Image 1: <...>Image 2: <...>Task: ..." with no warning, and
+    # the training-time prompt stops matching whatever the same string renders to at
+    # inference time.
+    if preserve_whitespace:
+        return input_string.replace(token, replacement)
 
-def llava_to_openai(conversations, is_video=False):
+    return re.sub(r'\n*' + re.escape(token) + r'\n*', replacement, input_string)
+
+def llava_to_openai(conversations, is_video=False, preserve_whitespace=False):
     role_mapping = {"human": "user", "gpt": "assistant"}
 
     transformed_data = []
     for conversation in conversations:
-        transformed_content = replace_image_tokens(conversation["value"], is_video=is_video)
+        transformed_content = replace_image_tokens(
+            conversation["value"], is_video=is_video, preserve_whitespace=preserve_whitespace
+        )
         transformed_entry = {
             "role": role_mapping.get(conversation["from"], conversation["from"]),
             "content": transformed_content,

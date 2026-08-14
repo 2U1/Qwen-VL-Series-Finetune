@@ -440,6 +440,7 @@ bash scripts/finetune_lora_vision.sh
 - `--image_max_pixles` (int): Option for maximum maxmimum tokens for image.
 - `--video_min_pixels` (int): Option for minimum input tokens for video.
 - `--video_max_pixles` (int): Option for maximum maxmimum tokens for video.
+- `--preserve_media_token_whitespace` (bool): Keep the newlines written around `<image>`/`<video>` instead of collapsing them (default `False`, which matches the official Qwen chat template rendering). Turn it on when the layout around the media tokens carries meaning, e.g. `"Image 1: <image>\nImage 2: <image>\n\nTask: ..."`.
 - `--image_resized_width` (int): Option for setting the width of the input image.
 - `--image_resized_height` (int): Option for setting the height of the input image.
 - `--video_resized_width` (int): Option for setting the width of the input video.
