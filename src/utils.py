@@ -69,8 +69,21 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         non_lora_trainables = {(k[11:] if k.startswith('base_model.') else k): v for k, v in non_lora_trainables.items()}
         if any(k.startswith('model.model.') for k in non_lora_trainables):
             non_lora_trainables = {(k[6:] if k.startswith('model.') else k): v for k, v in non_lora_trainables.items()}
-        model.load_state_dict(non_lora_trainables, strict=False)
-    
+        # `strict=False` is required here (the LoRA weights are loaded separately), but it
+        # also silently swallows every key that does not line up with the model. Those keys
+        # are trained weights -- typically the visual merger saved by `--freeze_merger
+        # False` -- so dropping them produces a model that quietly runs with the untrained
+        # base module and reports no error at all. Fail loudly instead.
+        load_result = model.load_state_dict(non_lora_trainables, strict=False)
+        if load_result.unexpected_keys:
+            preview = ', '.join(sorted(load_result.unexpected_keys)[:8])
+            raise RuntimeError(
+                f"{len(load_result.unexpected_keys)} of {len(non_lora_trainables)} tensors in "
+                f"non_lora_state_dict.bin match no parameter or buffer of the model and would "
+                f"have been discarded silently: {preview}. The merged model would keep the "
+                f"untrained weights for those modules."
+            )
+
         print('Loading LoRA weights...')
         model = PeftModel.from_pretrained(model, model_path)
 
