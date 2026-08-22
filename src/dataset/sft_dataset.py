@@ -144,7 +144,10 @@ class SupervisedDataset(Dataset):
             images=None
             videos=None
 
-        sources = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
+        sources = copy.deepcopy(llava_to_openai(
+            sources['conversations'], is_video=is_video,
+            preserve_whitespace=getattr(self.data_args, 'preserve_media_token_whitespace', False),
+        ))
 
         all_input_ids = []
         all_labels = []

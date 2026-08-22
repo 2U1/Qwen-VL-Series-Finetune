@@ -133,7 +133,10 @@ class GRPODataset(Dataset):
             images=None
             videos=None
 
-        conversations = copy.deepcopy(llava_to_openai(sources['conversations'], is_video=is_video))
+        conversations = copy.deepcopy(llava_to_openai(
+            sources['conversations'], is_video=is_video,
+            preserve_whitespace=getattr(self.data_args, 'preserve_media_token_whitespace', False),
+        ))
 
         user_input = conversations[0]
         gpt_response = conversations[1]

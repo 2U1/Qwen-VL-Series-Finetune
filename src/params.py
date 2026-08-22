@@ -311,3 +311,12 @@ class DataArguments:
         default=False,
         metadata={"help": "Enable reasoning-field parsing and model-specific <think> prompt formatting when supported."},
     )
+    preserve_media_token_whitespace: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep the newlines you wrote around <image>/<video> instead of collapsing them. "
+                    "Off by default so existing datasets render exactly as before; turn it on when "
+                    "the prompt layout around the media tokens is meaningful (e.g. "
+                    "'Image 1: <image>\\nImage 2: <image>\\n\\nTask: ...')."
+        },
+    )
