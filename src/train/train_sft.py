@@ -86,7 +86,11 @@ def train():
         (ModelArguments, DataArguments, TrainingArguments))
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
+
+    # `--max_seq_length` is declared on TrainingArguments but the dataset is the only place
+    # that can enforce it, so hand it over explicitly.
+    data_args.max_seq_length = training_args.max_seq_length
+
     if data_args.nframes is not None and data_args.fps is not None:
         raise ValueError("You cannot set both `nframes` and `fps` at the same time. Please set only one of them.")
 
